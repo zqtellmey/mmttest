@@ -1,0 +1,36 @@
+name: Build Paper Plugin
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up JDK 21
+      uses: actions/setup-java@v4
+      with:
+        java-version: '21'
+        distribution: 'temurin'
+        cache: maven
+
+    # 第一步：创建 libs 目录并下载 21MB 的完整依赖包
+    - name: Download Full MCProtocolLib Shaded JAR
+      run: |
+        mkdir -p libs
+        curl -L "https://repo.opencollab.dev/maven-snapshots/org/geysermc/mcprotocollib/protocol/master-SNAPSHOT/protocol-master-SNAPSHOT.jar" -o libs/MCProtocolLib-master-SNAPSHOT.jar
+        # 打印文件大小以确认是否下载成功（应显示 20000000 左右的字节）
+        ls -lh libs/
+
+    # 第二步：编译打包（此时 Maven 会读取下载好的本地 JAR）
+    - name: Build with Maven
+      run: mvn -B package --file pom.xml
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: CoreLink-Plugin
+        path: target/CoreLink.jar
