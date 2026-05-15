@@ -7,88 +7,92 @@ import java.net.Socket;
 import java.nio.file.Files;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class CoreLink extends JavaPlugin {
-
-    // 1. 账号配置类
-    static class BotAccount {
-        String desc, host, user;
-        int port;
-        public BotAccount(String desc, String host, int port, String user) {
-            this.desc = desc; this.host = host; this.port = port; this.user = user;
-        }
-    }
-
-    private final List<BotAccount> accounts = new ArrayList<>();
-    private final List<Thread> botThreads = new ArrayList<>();
 
     @Override
     public void onEnable() {
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
+        
+        logToFile("CoreLink 守护进程启动，开始加载 acc.json...");
+        loadAndStartBots();
+    }
 
-        // --- 2. 账号池配置 (按你要求的缩写格式) ---
-        // 如果 host 为空 ""，后续逻辑可以改为自动获取，目前按你提供的填入
-        accounts.add(new BotAccount("crssssrve", "xx.xx.234.50", 5091, "How"));
-        accounts.add(new BotAccount("zenix", "xx.xx.164.32", 10770, "How"));
+    private void loadAndStartBots() {
+        File file = new File(getDataFolder(), "acc.json");
+        if (!file.exists()) {
+            logToFile("错误: 未找到 acc.json。请创建该文件并填入账号信息。");
+            return;
+        }
 
-        logToFile("CoreLink 纯 Java 增强版已启动，正在初始化账号...");
+        try {
+            String content = Files.readString(file.toPath());
+            // 匹配格式: {"desc":"xxx","h":"xxx","p":123,"u":"xxx"}
+            Pattern pattern = Pattern.compile("\\{\"desc\":\"(.*?)\",\"h\":\"(.*?)\",\"p\":(\\d+),\"u\":\"(.*?)\"\\}");
+            Matcher matcher = pattern.matcher(content);
 
-        // 启动账号线程
-        for (BotAccount acc : accounts) {
-            startBotThread(acc);
-            try { Thread.sleep(2000); } catch (InterruptedException e) { break; }
+            int count = 0;
+            while (matcher.find()) {
+                String desc = matcher.group(1);
+                String host = matcher.group(2);
+                int port = Integer.parseInt(matcher.group(3));
+                String user = matcher.group(4);
+
+                // 如果 h 为空，自动切换为 127.0.0.1
+                String finalHost = (host == null || host.trim().isEmpty()) ? "127.0.0.1" : host;
+                
+                // 异步启动每个账号的维持线程
+                startConnection(desc, finalHost, port, user);
+                count++;
+            }
+            logToFile("已成功初始化 " + count + " 个账号。");
+        } catch (Exception e) {
+            logToFile("加载 acc.json 失败: " + e.getMessage());
         }
     }
 
-    private void startBotThread(BotAccount acc) {
-        Thread t = new Thread(() -> {
+    private void startConnection(String desc, String host, int port, String user) {
+        Thread thread = new Thread(() -> {
             while (true) {
                 try (Socket socket = new Socket()) {
-                    String targetHost = (acc.host == null || acc.host.isEmpty()) ? "127.0.0.1" : acc.host;
+                    logToFile("[" + desc + "] 尝试连接: " + host + ":" + port);
                     
-                    logToFile("正在尝试连接 [" + acc.desc + "]: " + targetHost + ":" + acc.port);
-                    
-                    // 设置 10 秒连接超时
-                    socket.connect(new InetSocketAddress(targetHost, acc.port), 10000);
+                    // 10秒连接超时
+                    socket.connect(new InetSocketAddress(host, port), 10000);
 
                     if (socket.isConnected()) {
-                        logToFile("上线成功: " + acc.user + " @ " + acc.desc);
+                        logToFile("[" + desc + "] 上线成功: 用户名 " + user);
                         
-                        // 保持在线循环
+                        // 循环发送心跳数据，维持连接活跃
                         while (!socket.isClosed() && socket.isConnected()) {
-                            // 每 30 秒进行一次活跃度检查/模拟
-                            Thread.sleep(30000);
-                            logToFile("调度: " + acc.user + " @ " + acc.desc + " 状态正常");
-                            
-                            // 发送一个字节探测连接是否真的存活
-                            socket.sendUrgentData(0xFF);
+                            Thread.sleep(30000); // 每30秒活跃一次
+                            socket.sendUrgentData(0xFF); 
                         }
                     }
                 } catch (Exception e) {
-                    logToFile("连接异常 [" + acc.desc + "]: " + e.getMessage());
+                    logToFile("[" + desc + "] 连接中断/失败: " + e.getMessage() + " (15秒后重连)");
                 }
-                
-                // 掉线或失败后 15 秒重连
-                try { Thread.sleep(15000); } catch (InterruptedException e) { break; }
+
+                try { Thread.sleep(15000); } catch (InterruptedException ex) { break; }
             }
         });
-        t.setDaemon(true);
-        t.start();
-        botThreads.add(t);
+        thread.setDaemon(true);
+        thread.start();
     }
 
-    // --- 3. 严格的日志系统 (满500行自动清空) ---
+    // 日志系统：严格执行 500 行清理
     public void logToFile(String message) {
         try {
             File logFile = new File(getDataFolder(), "run.log");
             if (logFile.exists()) {
                 List<String> lines = Files.readAllLines(logFile.toPath());
-                // 严格遵守要求：超过或等于 500 行清空文件
                 if (lines.size() >= 500) {
+                    // 超过 500 行，清空文件
                     try (PrintWriter writer = new PrintWriter(logFile)) {
-                        writer.print(""); 
+                        writer.print("");
                     }
                 }
             }
@@ -97,11 +101,5 @@ public class CoreLink extends JavaPlugin {
                 out.println("[" + timestamp + "] " + message);
             }
         } catch (Exception ignored) {}
-    }
-
-    @Override
-    public void onDisable() {
-        logToFile("插件已卸载，正在关闭所有连接...");
-        // 实际上线程由于是守护线程且依赖 socket 状态，会自动随插件关闭而结束
     }
 }
