@@ -1,123 +1,111 @@
-package com.legacy;
+package me.user.corelink;
 
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import org.bukkit.plugin.java.JavaPlugin;
-import java.io.*;
+import org.geysermc.mcprotocollib.network.Session;
+import org.geysermc.mcprotocollib.network.event.session.DisconnectedEvent;
+import org.geysermc.mcprotocollib.network.event.session.SessionAdapter;
+import org.geysermc.mcprotocollib.network.packet.Packet;
+import org.geysermc.mcprotocollib.network.tcp.TcpClientSession;
+import org.geysermc.mcprotocollib.protocol.MinecraftProtocol;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.entity.ClientboundMoveEntityPosPacket;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.level.ServerboundAcceptTeleportationPacket;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.level.ClientboundPlayerPositionPacket;
+import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.player.ServerboundMovePlayerPosPacket;
+
+import java.io.File;
+import java.io.FileReader;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class CoreLink extends JavaPlugin {
 
-    private final List<Process> serviceProcesses = new ArrayList<>();
-    private final String SCRIPT_NAME = "CoreService.js";
+    private final List<Session> activeSessions = new ArrayList<>();
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(4);
+    private final Random random = new Random();
+    private List<Map<String, String>> accounts = new ArrayList<>();
 
     @Override
     public void onEnable() {
-        getLogger().info("=== CoreLink: 正在初始化系统组件 (1.21.11) ===");
+        saveDefaultConfig();
+        loadAccounts();
         
-        setupEnvironment();
+        getLogger().info("=== CoreLink Java Edition (1.21.11) 已启动 ===");
         
-        if (checkAndInstallDeps()) {
-            startServices();
-        } else {
-            getLogger().severe("环境初始化失败，请确保已安装 Node.js 环境。");
+        // 启动所有机器人
+        for (Map<String, String> acc : accounts) {
+            startBot(acc.get("username"), acc.get("host"), Integer.parseInt(acc.get("port")));
         }
     }
 
-    private void setupEnvironment() {
-        if (!getDataFolder().exists()) getDataFolder().mkdirs();
-
-        // 写入 package.json
-        File pkgFile = new File(getDataFolder(), "package.json");
-        String pkgContent = "{\n" +
-                "  \"name\": \"core-link-service\",\n" +
-                "  \"version\": \"1.0.0\",\n" +
-                "  \"main\": \"" + SCRIPT_NAME + "\",\n" +
-                "  \"dependencies\": {\n" +
-                "    \"mineflayer\": \"latest\",\n" +
-                "    \"minecraft-data\": \"latest\",\n" +
-                "    \"prismarine-auth\": \"latest\",\n" +
-                "    \"mineflayer-pvp\": \"latest\",\n" +
-                "    \"mineflayer-pathfinder\": \"latest\",\n" +
-                "    \"mineflayer-armor-manager\": \"latest\",\n" +
-                "    \"proxy-agent\": \"latest\"\n" +
-                "  }\n" +
-                "}";
-        
-        try {
-            Files.writeString(pkgFile.toPath(), pkgContent, StandardCharsets.UTF_8);
-            File jsFile = new File(getDataFolder(), SCRIPT_NAME);
-            if (!jsFile.exists()) saveResource(SCRIPT_NAME, false);
-        } catch (IOException e) {
-            getLogger().severe("配置写入失败: " + e.getMessage());
-        }
-    }
-
-    private boolean checkAndInstallDeps() {
-        File nodeModules = new File(getDataFolder(), "node_modules");
-        if (nodeModules.exists()) return true;
-
-        getLogger().info("正在下载系统依赖库，请稍候...");
-        try {
-            String npm = System.getProperty("os.name").toLowerCase().contains("win") ? "npm.cmd" : "npm";
-            ProcessBuilder pb = new ProcessBuilder(npm, "install");
-            pb.directory(getDataFolder());
-            pb.inheritIO();
-            return pb.start().waitFor() == 0;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    private void startServices() {
-        File f = new File(getDataFolder(), "acc.json");
-        if (!f.exists()) {
+    private void loadAccounts() {
+        File file = new File(getDataFolder(), "acc.json");
+        if (!file.exists()) {
             saveResource("acc.json", false);
-            return;
         }
-
-        try {
-            String content = Files.readString(f.toPath(), StandardCharsets.UTF_8);
-            Pattern p = Pattern.compile("\\{\\s*\"desc\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"h\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"p\"\\s*:\\s*(\\d+)\\s*,\\s*\"u\"\\s*:\\s*\"(.*?)\"\\s*\\}");
-            Matcher m = p.matcher(content);
-
-            while (m.find()) {
-                launchProcess(m.group(1), m.group(2).isEmpty() ? "127.0.0.1" : m.group(2), m.group(3), m.group(4));
-            }
+        try (FileReader reader = new FileReader(file, StandardCharsets.UTF_8)) {
+            accounts = new Gson().fromJson(reader, new TypeToken<List<Map<String, String>>>(){}.getType());
         } catch (Exception e) {
-            getLogger().severe("账号解析异常: " + e.getMessage());
+            getLogger().severe("无法读取 acc.json 配置文件!");
         }
     }
 
-    private void launchProcess(String desc, String host, String port, String user) {
-        new Thread(() -> {
-            try {
-                // 强制指定 1.21.11 协议
-                ProcessBuilder pb = new ProcessBuilder("node", SCRIPT_NAME, host, port, user, desc, "1.21.11");
-                pb.directory(getDataFolder());
-                pb.inheritIO();
-                
-                Process process = pb.start();
-                serviceProcesses.add(process);
-                
-                if (process.waitFor() != 0) {
-                    getLogger().warning("服务 [" + desc + "] 异常中断，15秒后自动恢复...");
-                    Thread.sleep(15000);
-                    launchProcess(desc, host, port, user);
+    private void startBot(String username, String host, int port) {
+        MinecraftProtocol protocol = new MinecraftProtocol(username);
+        Session client = new TcpClientSession(host, port, protocol);
+
+        client.addListener(new SessionAdapter() {
+            @Override
+            public void packetReceived(Session session, Packet packet) {
+                // 自动确认传送 (防止掉出世界)
+                if (packet instanceof ClientboundPlayerPositionPacket p) {
+                    session.send(new ServerboundAcceptTeleportationPacket(p.getTeleportId()));
                 }
-            } catch (Exception e) {
-                e.printStackTrace();
             }
-        }).start();
+
+            @Override
+            public void disconnected(DisconnectedEvent event) {
+                getLogger().warning("机器人 [" + username + "] 掉线: " + event.getReason());
+                activeSessions.remove(session);
+                // 15秒后尝试重连
+                scheduler.schedule(() -> startBot(username, host, port), 15, TimeUnit.SECONDS);
+            }
+        });
+
+        client.connect();
+        activeSessions.add(client);
+        getLogger().info("正在连接机器人: " + username);
+
+        // 启动随机走动任务 (每 5-10 秒走动一次)
+        startRandomWalk(client);
+    }
+
+    private void startRandomWalk(Session session) {
+        scheduler.scheduleWithFixedDelay(() -> {
+            if (session.isConnected()) {
+                // 随机产生小范围位移 (-0.5 到 0.5)
+                double offsetX = (random.nextDouble() - 0.5);
+                double offsetZ = (random.nextDouble() - 0.5);
+                
+                // 发送移动包保持在线 (假设当前在原地微调)
+                // 注意：在正式环境需要记录当前坐标，这里演示微小晃动防止踢出
+                session.send(new ServerboundMovePlayerPosPacket(true, offsetX, 0, offsetZ));
+            }
+        }, 10, 10, TimeUnit.SECONDS);
     }
 
     @Override
     public void onDisable() {
-        for (Process p : serviceProcesses) {
-            if (p != null && p.isAlive()) p.destroy();
+        for (Session session : activeSessions) {
+            session.disconnect("Plugin disabled");
         }
+        scheduler.shutdownNow();
     }
 }
