@@ -22,7 +22,7 @@
     </repositories>
 
     <dependencies>
-        <!-- 这里的依赖会直接读取第一步在本地编译生成的 20MB 产物 -->
+        <!-- 指向刚才本地编译出的 protocol 模块 -->
         <dependency>
             <groupId>org.geysermc.mcprotocollib</groupId>
             <artifactId>protocol</artifactId>
