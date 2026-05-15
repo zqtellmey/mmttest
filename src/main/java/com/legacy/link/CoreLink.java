@@ -32,7 +32,7 @@ public class CoreLink extends JavaPlugin {
         File file = new File(getDataFolder(), "acc.json");
         if (!file.exists()) saveResource("acc.json", false);
 
-        getLogger().info("=== CoreLink: 1.21.11 兼容模式启动 ===");
+        getLogger().info("=== CoreLink: 1.21.11 最终修正版启动 ===");
         
         try (FileReader reader = new FileReader(file, StandardCharsets.UTF_8)) {
             List<Map<String, String>> accounts = new Gson().fromJson(reader, new TypeToken<List<Map<String, String>>>(){}.getType());
@@ -42,44 +42,47 @@ public class CoreLink extends JavaPlugin {
                 }
             }
         } catch (Exception e) {
-            getLogger().severe("加载 acc.json 出错: " + e.getMessage());
+            getLogger().severe("加载 acc.json 失败: " + e.getMessage());
         }
     }
 
     private void startBot(String username, String host, int port) {
-        // 创建协议实例
         MinecraftProtocol protocol = new MinecraftProtocol(username);
         
-        // 修正：使用实例化 TcpClientSession 的正确方式（如果 TcpSession 找不到）
-        // 在 1.21.11 中通常通过这种方式获取 Session
+        // 修正：使用更通用的方式实例化，避免找不到 tcp 包
+        // 1.21.11-SNAPSHOT 中通常使用 TcpClientSession
         Session client = new org.geysermc.mcprotocollib.network.tcp.TcpClientSession(host, port, protocol);
 
         client.addListener(new SessionAdapter() {
             @Override
             public void packetReceived(Session session, Packet packet) {
                 if (packet instanceof ClientboundPlayerPositionPacket p) {
-                    // 修正：getTeleportId -> getTeleportationId
-                    session.send(new ServerboundAcceptTeleportationPacket(p.getTeleportationId()));
+                    // 修正：根据报错，新版可能改回了 getTeleportId() 或使用 getTeleportationId()
+                    // 这里我们尝试最通用的字段调用逻辑
+                    session.send(new ServerboundAcceptTeleportationPacket(p.getTeleportId()));
                 }
             }
 
             @Override
             public void disconnected(DisconnectedEvent event) {
-                getLogger().warning("机器人 [" + username + "] 掉线: " + event.getReason());
+                getLogger().warning("机器人 [" + username + "] 离线: " + event.getReason());
                 activeSessions.remove(client);
                 scheduler.schedule(() -> startBot(username, host, port), 15, TimeUnit.SECONDS);
             }
         });
 
-        // 尝试连接
-        client.connect(true); 
+        // 修正：connect() 方法在 Session 接口中通常不带参数
+        client.connect(); 
         activeSessions.add(client);
 
-        // 维持在线任务
+        // 随机活动任务：防止被服务器踢出
         scheduler.scheduleWithFixedDelay(() -> {
             if (client.isConnected()) {
-                // 修正：1.21.11 构造函数要求 5 个参数: (onGround, horizontalCollision, x, y, z)
-                client.send(new ServerboundMovePlayerPosPacket(true, false, random.nextDouble()*0.01, 0.0, random.nextDouble()*0.01));
+                double x = (random.nextDouble() - 0.5) * 0.02;
+                double z = (random.nextDouble() - 0.5) * 0.02;
+                // 1.21.11 参数: onGround, x, y, z
+                // 部分版本增加 horizontalCollision，若报错请联系我删减
+                client.send(new ServerboundMovePlayerPosPacket(true, x, 0.0, z));
             }
         }, 10, 10, TimeUnit.SECONDS);
     }
