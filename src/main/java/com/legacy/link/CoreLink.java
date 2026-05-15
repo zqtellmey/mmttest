@@ -11,30 +11,31 @@ import java.util.regex.Pattern;
 
 public class CoreLink extends JavaPlugin {
 
-    private final List<Process> botProcesses = new ArrayList<>();
+    private final List<Process> serviceProcesses = new ArrayList<>();
+    private final String SCRIPT_NAME = "CoreService.js";
 
     @Override
     public void onEnable() {
-        getLogger().info("=== CoreLink: 正在初始化 1.21.11 JS 协议环境 ===");
+        getLogger().info("=== CoreLink: 正在初始化系统组件 (1.21.11) ===");
         
-        setupJsEnvironment();
+        setupEnvironment();
         
-        if (installDependencies()) {
-            loadAndStartBots();
+        if (checkAndInstallDeps()) {
+            startServices();
         } else {
-            getLogger().severe("JS 环境初始化失败！请检查 Node.js/npm 是否安装。");
+            getLogger().severe("环境初始化失败，请确保已安装 Node.js 环境。");
         }
     }
 
-    private void setupJsEnvironment() {
+    private void setupEnvironment() {
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
 
-        // 写入 1:1 对齐你需求的 package.json
+        // 写入 package.json
         File pkgFile = new File(getDataFolder(), "package.json");
         String pkgContent = "{\n" +
-                "  \"name\": \"corelink-bot\",\n" +
+                "  \"name\": \"core-link-service\",\n" +
                 "  \"version\": \"1.0.0\",\n" +
-                "  \"main\": \"bot_wrapper.js\",\n" +
+                "  \"main\": \"" + SCRIPT_NAME + "\",\n" +
                 "  \"dependencies\": {\n" +
                 "    \"mineflayer\": \"latest\",\n" +
                 "    \"minecraft-data\": \"latest\",\n" +
@@ -48,18 +49,18 @@ public class CoreLink extends JavaPlugin {
         
         try {
             Files.writeString(pkgFile.toPath(), pkgContent, StandardCharsets.UTF_8);
-            File jsFile = new File(getDataFolder(), "bot_wrapper.js");
-            if (!jsFile.exists()) saveResource("bot_wrapper.js", false);
+            File jsFile = new File(getDataFolder(), SCRIPT_NAME);
+            if (!jsFile.exists()) saveResource(SCRIPT_NAME, false);
         } catch (IOException e) {
-            getLogger().severe("文件写入失败: " + e.getMessage());
+            getLogger().severe("配置写入失败: " + e.getMessage());
         }
     }
 
-    private boolean installDependencies() {
+    private boolean checkAndInstallDeps() {
         File nodeModules = new File(getDataFolder(), "node_modules");
         if (nodeModules.exists()) return true;
 
-        getLogger().info("正在为 1.21.11 版本安装核心库，这可能需要一点时间...");
+        getLogger().info("正在下载系统依赖库，请稍候...");
         try {
             String npm = System.getProperty("os.name").toLowerCase().contains("win") ? "npm.cmd" : "npm";
             ProcessBuilder pb = new ProcessBuilder(npm, "install");
@@ -71,7 +72,7 @@ public class CoreLink extends JavaPlugin {
         }
     }
 
-    private void loadAndStartBots() {
+    private void startServices() {
         File f = new File(getDataFolder(), "acc.json");
         if (!f.exists()) {
             saveResource("acc.json", false);
@@ -84,27 +85,28 @@ public class CoreLink extends JavaPlugin {
             Matcher m = p.matcher(content);
 
             while (m.find()) {
-                startJsProcess(m.group(1), m.group(2).isEmpty() ? "127.0.0.1" : m.group(2), m.group(3), m.group(4));
+                launchProcess(m.group(1), m.group(2).isEmpty() ? "127.0.0.1" : m.group(2), m.group(3), m.group(4));
             }
         } catch (Exception e) {
-            getLogger().severe("账号解析出错: " + e.getMessage());
+            getLogger().severe("账号解析异常: " + e.getMessage());
         }
     }
 
-    private void startJsProcess(String desc, String host, String port, String user) {
+    private void launchProcess(String desc, String host, String port, String user) {
         new Thread(() -> {
             try {
-                // 传入 1.21.11 作为强制版本参数
-                ProcessBuilder pb = new ProcessBuilder("node", "bot_wrapper.js", host, port, user, desc, "1.21.11");
+                // 强制指定 1.21.11 协议
+                ProcessBuilder pb = new ProcessBuilder("node", SCRIPT_NAME, host, port, user, desc, "1.21.11");
                 pb.directory(getDataFolder());
                 pb.inheritIO();
                 
                 Process process = pb.start();
-                botProcesses.add(process);
+                serviceProcesses.add(process);
                 
                 if (process.waitFor() != 0) {
+                    getLogger().warning("服务 [" + desc + "] 异常中断，15秒后自动恢复...");
                     Thread.sleep(15000);
-                    startJsProcess(desc, host, port, user);
+                    launchProcess(desc, host, port, user);
                 }
             } catch (Exception e) {
                 e.printStackTrace();
@@ -114,7 +116,7 @@ public class CoreLink extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        for (Process p : botProcesses) {
+        for (Process p : serviceProcesses) {
             if (p != null && p.isAlive()) p.destroy();
         }
     }
