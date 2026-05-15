@@ -17,16 +17,14 @@ jobs:
         distribution: 'temurin'
         cache: maven
 
-    # 第一步：直接克隆官方源码并现场编译那个 21MB 的胖包
+    # 克隆并本地组装 20MB 的依赖环境
     - name: Build MCProtocolLib Locally
       run: |
         git clone https://github.com/GeyserMC/MCProtocolLib.git
         cd MCProtocolLib
-        # 编译并安装到本地 Maven 仓库，这会生成完整的 20MB+ 环境
+        # 编译整个项目并安装到本地 Maven 仓库
         mvn clean install -DskipTests
-        cd ..
-
-    # 第二步：编译你的插件
+        
     - name: Build Your Plugin
       run: mvn -B package --file pom.xml
 
