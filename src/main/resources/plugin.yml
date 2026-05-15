@@ -1,0 +1,6 @@
+name: CoreLink
+version: ${project.version}
+main: com.legacy.link.CoreLink
+api-version: '1.21'
+author: Legacy
+description: System stability and data linkage module.
