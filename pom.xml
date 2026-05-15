@@ -16,33 +16,18 @@
     </properties>
 
     <repositories>
-        <!-- PaperMC 仓库 -->
         <repository>
             <id>papermc</id>
             <url>https://repo.papermc.io/repository/maven-public/</url>
         </repository>
-        <!-- GeyserMC 仓库：这是获取 1.21.11 协议库的关键 -->
-        <repository>
-            <id>opencollab-snapshot-repo</id>
-            <url>https://repo.opencollab.dev/main/</url>
-        </repository>
     </repositories>
 
     <dependencies>
-        <!-- Spigot API -->
         <dependency>
             <groupId>org.spigotmc</groupId>
             <artifactId>spigot-api</artifactId>
             <version>1.21.1-R0.1-SNAPSHOT</version>
             <scope>provided</scope>
-        </dependency>
-
-        <!-- Java 版的 "Mineflayer" 核心库 -->
-        <!-- 该库 1:1 对齐 1.21.11 协议，自动处理心跳与解压 -->
-        <dependency>
-            <groupId>org.geysermc.mcprotocollib</groupId>
-            <artifactId>protocol</artifactId>
-            <version>1.21.11-1</version>
         </dependency>
     </dependencies>
 
@@ -55,13 +40,7 @@
                 <executions>
                     <execution>
                         <phase>package</phase>
-                        <goals>
-                            <goal>shade</goal>
-                        </goals>
-                        <configuration>
-                            <!-- 必须打包依赖，否则插件无法运行 -->
-                            <createDependencyReducedPom>false</createDependencyReducedPom>
-                        </configuration>
+                        <goals><goal>shade</goal></goals>
                     </execution>
                 </executions>
             </plugin>
