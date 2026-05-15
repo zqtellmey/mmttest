@@ -17,15 +17,8 @@ jobs:
         distribution: 'temurin'
         cache: maven
 
-    # 克隆并本地组装 20MB 的依赖环境
-    - name: Build MCProtocolLib Locally
-      run: |
-        git clone https://github.com/GeyserMC/MCProtocolLib.git
-        cd MCProtocolLib
-        # 编译整个项目并安装到本地 Maven 仓库
-        mvn clean install -DskipTests
-        
-    - name: Build Your Plugin
+    # 只运行这一步。如果 pom.xml 里的版本号 (1.20.1-1) 对应上了，Maven 会自动下全。
+    - name: Build with Maven
       run: mvn -B package --file pom.xml
 
     - name: Upload Artifact
