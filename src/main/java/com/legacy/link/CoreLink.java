@@ -1,123 +1,130 @@
 package com.legacy;
 
 import org.bukkit.plugin.java.JavaPlugin;
-import org.geysermc.mcprotocollib.network.Session;
-import org.geysermc.mcprotocollib.network.event.session.SessionAdapter;
-import org.geysermc.mcprotocollib.network.packet.Packet;
-import org.geysermc.mcprotocollib.network.tcp.TcpClientSession;
-import org.geysermc.mcprotocollib.protocol.MinecraftProtocol;
-import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.ClientboundKeepAlivePacket;
-import org.geysermc.mcprotocollib.protocol.packet.ingame.serverbound.ServerboundKeepAlivePacket;
-import org.geysermc.mcprotocollib.protocol.packet.ingame.clientbound.entity.spawn.ClientboundAddEntityPacket;
-
-import java.io.File;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class CoreLink extends JavaPlugin {
 
-    private final List<AccountConfig> accountsList = new ArrayList<>();
-    private final Map<String, Session> activeBots = new HashMap<>();
-    private final Map<String, Boolean> hasSpawnedOnce = new HashMap<>();
-    private int currentAccountIndex = 0;
+    private final List<Process> botProcesses = new ArrayList<>();
 
     @Override
     public void onEnable() {
-        getLogger().info("=== CoreLink Multi-Bot Engine Start ===");
-        loadAccounts();
-
-        // 对应 JS: accounts.forEach((acc, i) => { setTimeout(...) })
-        for (int i = 0; i < accountsList.size(); i++) {
-            final int index = i;
-            getServer().getScheduler().runTaskLater(this, () -> startManager(accountsList.get(index)), i * 60L);
+        getLogger().info("=== CoreLink: 正在初始化 Mineflayer JS 环境 ===");
+        
+        // 1. 初始化文件
+        setupJsEnvironment();
+        
+        // 2. 自动安装依赖
+        if (installDependencies()) {
+            // 3. 依赖就绪后加载账号
+            loadAndStartBots();
+        } else {
+            getLogger().severe("JS 依赖安装失败，请检查是否安装了 Node.js 和 npm！");
         }
-
-        // 对应 JS: 20秒后开启增强型公平调度循环
-        getServer().getScheduler().runTaskLater(this, this::tick, 400L);
     }
 
-    private void loadAccounts() {
+    private void setupJsEnvironment() {
+        if (!getDataFolder().exists()) getDataFolder().mkdirs();
+
+        // 写入你提供的依赖配置到 package.json
+        File pkgFile = new File(getDataFolder(), "package.json");
+        String pkgContent = "{\n" +
+                "  \"name\": \"corelink-bot\",\n" +
+                "  \"version\": \"1.0.0\",\n" +
+                "  \"description\": \"Multi-server Minecraft BOT with Auto-reconnect, PVP, and Random Walk features\",\n" +
+                "  \"main\": \"bot_wrapper.js\",\n" +
+                "  \"dependencies\": {\n" +
+                "    \"mineflayer\": \"latest\",\n" +
+                "    \"minecraft-data\": \"latest\",\n" +
+                "    \"prismarine-auth\": \"latest\",\n" +
+                "    \"mineflayer-pvp\": \"latest\",\n" +
+                "    \"mineflayer-pathfinder\": \"latest\",\n" +
+                "    \"mineflayer-armor-manager\": \"latest\",\n" +
+                "    \"proxy-agent\": \"latest\"\n" +
+                "  }\n" +
+                "}";
+        
+        try {
+            Files.writeString(pkgFile.toPath(), pkgContent, StandardCharsets.UTF_8);
+            
+            // 释放 JS 运行脚本
+            File jsFile = new File(getDataFolder(), "bot_wrapper.js");
+            if (!jsFile.exists()) saveResource("bot_wrapper.js", false);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private boolean installDependencies() {
+        File nodeModules = new File(getDataFolder(), "node_modules");
+        if (nodeModules.exists()) return true;
+
+        getLogger().info("正在安装 JS 依赖 (mineflayer, pvp, pathfinder...)，请稍后...");
+        try {
+            // 根据系统判断命令前缀 (Windows使用npm.cmd)
+            String npm = System.getProperty("os.name").toLowerCase().contains("win") ? "npm.cmd" : "npm";
+            ProcessBuilder pb = new ProcessBuilder(npm, "install");
+            pb.directory(getDataFolder());
+            pb.inheritIO();
+            Process p = pb.start();
+            return p.waitFor() == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void loadAndStartBots() {
         File f = new File(getDataFolder(), "acc.json");
         if (!f.exists()) {
             saveResource("acc.json", false);
             return;
         }
+
         try {
             String content = Files.readString(f.toPath(), StandardCharsets.UTF_8);
             Pattern p = Pattern.compile("\\{\\s*\"desc\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"h\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"p\"\\s*:\\s*(\\d+)\\s*,\\s*\"u\"\\s*:\\s*\"(.*?)\"\\s*\\}");
             Matcher m = p.matcher(content);
+
             while (m.find()) {
-                // 如果 IP 为空，自动设为 127.0.0.1
-                String host = m.group(2).isEmpty() ? "127.0.0.1" : m.group(2);
-                accountsList.add(new AccountConfig(host, Integer.parseInt(m.group(3)), m.group(4)));
+                startJsProcess(m.group(1), m.group(2).isEmpty() ? "127.0.0.1" : m.group(2), m.group(3), m.group(4));
             }
         } catch (Exception e) {
-            getLogger().severe("Account file error: " + e.getMessage());
+            getLogger().severe("账号加载异常: " + e.getMessage());
         }
     }
 
-    private void startManager(AccountConfig config) {
-        // 创建协议实例 (对齐 mineflayer.createBot)
-        // 这里的 MinecraftProtocol 会自动根据用户名生成固定的离线 UUID
-        MinecraftProtocol protocol = new MinecraftProtocol(config.username);
-        Session client = new TcpClientSession(config.host, config.port, protocol);
-
-        client.addListener(new SessionAdapter() {
-            @Override
-            public void packetReceived(Session session, Packet packet) {
-                // 1:1 复刻心跳逻辑
-                if (packet instanceof ClientboundKeepAlivePacket) {
-                    long id = ((ClientboundKeepAlivePacket) packet).getPingId();
-                    session.send(new ServerboundKeepAlivePacket(id));
+    private void startJsProcess(String desc, String host, String port, String user) {
+        new Thread(() -> {
+            try {
+                ProcessBuilder pb = new ProcessBuilder("node", "bot_wrapper.js", host, port, user, desc);
+                pb.directory(getDataFolder());
+                pb.inheritIO();
+                
+                Process process = pb.start();
+                botProcesses.add(process);
+                
+                int exitCode = process.waitFor();
+                if (exitCode != 0) {
+                    getLogger().warning("Bot [" + desc + "] 已退出，15秒后重启...");
+                    Thread.sleep(15000);
+                    startJsProcess(desc, host, port, user);
                 }
-
-                // 模拟 'spawn' 事件：成功进入游戏
-                if (packet instanceof ClientboundAddEntityPacket && !hasSpawnedOnce.getOrDefault(config.host, false)) {
-                    getLogger().info("§a[上线成功] " + config.username + " @ " + config.host);
-                    hasSpawnedOnce.put(config.host, true);
-                }
+            } catch (Exception e) {
+                e.printStackTrace();
             }
-
-            @Override
-            public void disconnected(Session session, String reason, Throwable cause) {
-                // 对应 JS: bot.on('end') 15秒后重连
-                getLogger().warning("§e[离线] " + config.host + " -> 15秒后重连: " + reason);
-                hasSpawnedOnce.put(config.host, false);
-                getServer().getScheduler().runTaskLater(CoreLink.this, () -> startManager(config), 300L);
-            }
-        });
-
-        client.connect();
-        activeBots.put(config.host, client);
+        }).start();
     }
 
-    private void tick() {
-        if (accountsList.isEmpty()) return;
-
-        currentAccountIndex = currentAccountIndex % accountsList.size();
-        AccountConfig config = accountsList.get(currentAccountIndex);
-        Session bot = activeBots.get(config.host);
-
-        // 对应 JS: isSocketAlive 检查
-        if (bot != null && bot.isConnected() && hasSpawnedOnce.getOrDefault(config.host, false)) {
-            getLogger().info("§b[调度] " + config.username + " @ " + config.host + " -> 维持存活");
-            // 此处可根据需要添加特定的封包模拟动作
+    @Override
+    public void onDisable() {
+        for (Process p : botProcesses) {
+            if (p != null && p.isAlive()) p.destroy();
         }
-
-        currentAccountIndex++;
-        // 对应 JS: setTimeout(tick, 5000) -> 100 Ticks
-        getServer().getScheduler().runTaskLater(this, this::tick, 100L);
-    }
-
-    private static class AccountConfig {
-        String host, username;
-        int port;
-        AccountConfig(String h, int p, String u) { this.host = h; this.port = p; this.username = u; }
     }
 }
