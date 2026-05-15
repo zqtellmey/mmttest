@@ -18,89 +18,103 @@ public class CoreLink extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        // 1. 确保目录和文件初始化
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
         logFile = new File(getDataFolder(), "run.log");
-        if (!logFile.exists()) {
-            try { logFile.createNewFile(); } catch (IOException e) { getLogger().severe(e.getMessage()); }
+        
+        try {
+            if (!logFile.exists()) logFile.createNewFile();
+        } catch (IOException e) {
+            getLogger().severe("Cannot create log file: " + e.getMessage());
         }
-        logToFile("=== 插件启动 ===");
+
+        logToFile("=== 插件已成功载入系统 ===");
         loadAndStartBots();
     }
 
     private void loadAndStartBots() {
         File configFile = new File(getDataFolder(), "acc.json");
         if (!configFile.exists()) {
-            try { Files.writeString(configFile.toPath(), "[\n  {\"desc\":\"Server\", \"h\":\"\", \"p\":25565, \"u\":\"Myp\"}\n]"); } catch (Exception e) {}
+            logToFile("错误: 未找到 acc.json 配置文件。");
             return;
         }
+
         try {
             String content = Files.readString(configFile.toPath(), StandardCharsets.UTF_8);
-            // 匹配 acc.json 的缩写格式
+            // 增强型正则：匹配 {"desc":"xxx","h":"xxx","p":123,"u":"xxx"}
             Pattern pattern = Pattern.compile("\\{\\s*\"desc\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"h\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"p\"\\s*:\\s*(\\d+)\\s*,\\s*\"u\"\\s*:\\s*\"(.*?)\"\\s*\\}");
             Matcher matcher = pattern.matcher(content);
 
             int count = 0;
             while (matcher.find()) {
-                startConnection(matcher.group(1), matcher.group(2), Integer.parseInt(matcher.group(3)), matcher.group(4));
-                count++;
-            }
-            logToFile("成功加载 " + count + " 个账号。");
-        } catch (Exception e) { logToFile("解析 acc.json 失败: " + e.getMessage()); }
-    }
+                String desc = matcher.group(1);
+                String host = matcher.group(2);
+                int port = Integer.parseInt(matcher.group(3));
+                String user = matcher.group(4);
 
-    private void startConnection(String desc, String host, int port, String user) {
-        Thread thread = new Thread(() -> {
-            while (true) {
-                // 如果 h 为空则自动检索/设为 127.0.0.1
+                // 自动 IP 处理
                 String finalHost = (host == null || host.trim().isEmpty()) ? "127.0.0.1" : host;
                 
+                startBotProcess(desc, finalHost, port, user);
+                count++;
+            }
+            logToFile("配置加载完毕，共初始化 " + count + " 个账号。");
+        } catch (Exception e) {
+            logToFile("读取 acc.json 异常: " + e.getMessage());
+        }
+    }
+
+    private void startBotProcess(String desc, String host, int port, String user) {
+        Thread t = new Thread(() -> {
+            while (true) {
                 try (Socket socket = new Socket()) {
-                    socket.connect(new InetSocketAddress(finalHost, port), 15000);
+                    logToFile("[" + desc + "] 正在建立连接: " + host + ":" + port);
+                    socket.connect(new InetSocketAddress(host, port), 10000);
+                    
                     DataOutputStream out = new DataOutputStream(socket.getOutputStream());
                     InputStream in = socket.getInputStream();
 
-                    // 1. Handshake
+                    // --- 模拟 MC 离线模式登录流程 ---
+                    // Handshake
                     ByteArrayOutputStream b = new ByteArrayOutputStream();
                     DataOutputStream hand = new DataOutputStream(b);
                     writeVarInt(hand, 0x00); 
-                    writeVarInt(hand, 767); // 1.21.x 协议号
-                    writeString(hand, finalHost);
+                    writeVarInt(hand, 767); 
+                    writeString(hand, host);
                     hand.writeShort(port);
                     writeVarInt(hand, 2); 
                     sendPacket(out, b.toByteArray());
 
-                    // 2. Login Start
+                    // Login Start
                     b.reset();
                     writeVarInt(hand, 0x00);
                     writeString(hand, user);
-                    hand.writeLong(0); hand.writeLong(0); // UUID
+                    hand.writeLong(0); hand.writeLong(0);
                     sendPacket(out, b.toByteArray());
 
-                    logToFile("[" + desc + "] 登录尝试中: " + user);
+                    logToFile("[" + desc + "] 登录数据已发送，用户: " + user);
 
-                    // 3. 持续读取心跳包，保持在线
-                    byte[] buffer = new byte[1024];
+                    // 维持在线：读取服务器返回并防止超时
+                    byte[] buf = new byte[1024];
                     while (socket.isConnected() && !socket.isClosed()) {
-                        int read = in.read(buffer);
-                        if (read == -1) break; // 掉线了，跳出循环进入重连
+                        int r = in.read(buf);
+                        if (r == -1) break; 
                         
-                        // 定期发送 KeepAlive 探测防止被服务器清理
+                        // 定期发送 KeepAlive
                         socket.sendUrgentData(0xFF);
-                        Thread.sleep(100); 
+                        Thread.sleep(1000); 
                     }
                 } catch (Exception e) {
-                    logToFile("[" + desc + "] 连接掉线: " + e.getMessage() + "，15秒后重连");
+                    logToFile("[" + desc + "] 状态离线: " + e.getMessage() + " (15秒后自动重连)");
                 }
-                
-                // 掉线重连逻辑：等待 15 秒
-                try { Thread.sleep(15000); } catch (Exception ignored) {}
+                try { Thread.sleep(15000); } catch (InterruptedException ignored) {}
             }
         });
-        thread.setDaemon(true);
-        thread.start();
+        t.setDaemon(true);
+        t.start();
     }
 
-    // --- MC 协议工具函数 ---
+    // --- 协议工具 ---
     private void sendPacket(DataOutputStream out, byte[] data) throws IOException {
         writeVarInt(out, data.length);
         out.write(data);
@@ -120,14 +134,23 @@ public class CoreLink extends JavaPlugin {
         out.write(b);
     }
 
-    // 日志系统：满 500 行自动清空
+    // --- 严格的日志系统 ---
     public synchronized void logToFile(String message) {
         try {
-            if (logFile.exists() && Files.readAllLines(logFile.toPath()).size() >= 500) {
-                new PrintWriter(new FileWriter(logFile, false)).close();
+            // 检查行数：如果满 500 行则立即清空
+            if (logFile.exists()) {
+                List<String> lines = Files.readAllLines(logFile.toPath());
+                if (lines.size() >= 500) {
+                    Files.writeString(logFile.toPath(), "", StandardCharsets.UTF_8);
+                }
             }
-            try (PrintWriter out = new PrintWriter(new FileWriter(logFile, true))) {
-                out.println("[" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")) + "] " + message);
+
+            // 使用 FileWriter 并立即关闭以确保翼龙面板能刷新文件状态
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(logFile, true))) {
+                String ts = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+                writer.write("[" + ts + "] " + message);
+                writer.newLine();
+                writer.flush(); // 强制刷新流
             }
         } catch (Exception ignored) {}
     }
