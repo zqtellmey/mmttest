@@ -15,16 +15,6 @@
     </properties>
 
     <repositories>
-        <!-- 官网指定的正式版仓库 -->
-        <repository>
-            <id>opencollab</id>
-            <url>https://repo.opencollab.dev/main/</url>
-        </repository>
-        <!-- 官网指定的快照版仓库（必须包含这个才能找到最新的 master 分支构建） -->
-        <repository>
-            <id>opencollab-snapshots</id>
-            <url>https://repo.opencollab.dev/maven-snapshots/</url>
-        </repository>
         <repository>
             <id>spigot-repo</id>
             <url>https://hub.spigotmc.org/nexus/content/repositories/snapshots/</url>
@@ -32,11 +22,10 @@
     </repositories>
 
     <dependencies>
-        <!-- 使用官网标准的 groupId 和 artifactId -->
+        <!-- 这里的依赖会直接读取第一步在本地编译生成的 20MB 产物 -->
         <dependency>
             <groupId>org.geysermc.mcprotocollib</groupId>
             <artifactId>protocol</artifactId>
-            <!-- 建议使用具体版本或最新的快照版本 -->
             <version>master-SNAPSHOT</version>
         </dependency>
 
