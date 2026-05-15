@@ -1,7 +1,8 @@
 name: Build Plugin Project
 on:
-  push:
-    branches: [ "main" ]
+  workflow_dispatch: {} # 允许手动点击按钮触发
+#  push:
+#    branches: [ "main" ]
 jobs:
   build:
     runs-on: ubuntu-latest
