@@ -1,23 +1,36 @@
-name: Build Plugin Project
+name: Manual Build CoreLink (1.21.11)
+
+# 改为手动触发
 on:
-  workflow_dispatch: {} # 允许手动点击按钮触发
-#  push:
-#    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      build_tag:
+        description: '编译版本标签 (可选)'
+        required: false
+        default: 'stable'
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Environment
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 21
       uses: actions/setup-java@v4
       with:
         java-version: '21'
         distribution: 'temurin'
         cache: maven
-    - name: Execute Compile
-      run: mvn -B package --file pom.xml
-    - name: Upload Output
+
+    - name: Build and Package with Maven
+      # 按照你之前的要求：包含完整代码编译，且不改动已工作的代码
+      run: mvn -B clean package --file pom.xml
+
+    - name: Upload Plugin Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: CoreLink-Package
-        path: target/CoreLink.jar
+        name: CoreLink-Manual-Build
+        path: target/*.jar
+        retention-days: 7
