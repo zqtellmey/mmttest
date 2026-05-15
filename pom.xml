@@ -15,7 +15,6 @@
     </properties>
 
     <repositories>
-        <!-- JitPack 是拉取 GitHub 源码打包的唯一稳定选择 -->
         <repository>
             <id>jitpack.io</id>
             <url>https://jitpack.io</url>
@@ -27,7 +26,7 @@
     </repositories>
 
     <dependencies>
-        <!-- 对应 mineflayer 的核心协议库 -->
+        <!-- 核心库：Maven 会通过此项自动去 GitHub 爬取源码并补全约 20MB 的运行环境 -->
         <dependency>
             <groupId>com.github.GeyserMC</groupId>
             <artifactId>MCProtocolLib</artifactId>
@@ -39,6 +38,12 @@
             <artifactId>spigot-api</artifactId>
             <version>1.20.1-R0.1-SNAPSHOT</version>
             <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.10.1</version>
         </dependency>
     </dependencies>
 
