@@ -17,7 +17,7 @@ jobs:
         distribution: 'temurin'
         cache: maven
 
-    # 直接下令组装。Maven 会自动访问官网仓库并处理一切，不再需要 curl 下载
+    # Maven 会根据 pom.xml 中新加的 https://repo.opencollab.dev/main/ 路径去搜索依赖
     - name: Build with Maven
       run: mvn -B package --file pom.xml
 
