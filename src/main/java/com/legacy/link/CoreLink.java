@@ -20,7 +20,7 @@ public class CoreLink extends JavaPlugin {
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
         logFile = new File(getDataFolder(), "run.log");
         try { if (!logFile.exists()) logFile.createNewFile(); } catch (IOException ignored) {}
-        logToFile("=== 严格复刻 JS 版协议引擎 (1.21.11) ===");
+        logToFile("=== 1:1 模拟 JS 协议状态机 (774) ===");
         loadAccounts();
     }
 
@@ -32,7 +32,7 @@ public class CoreLink extends JavaPlugin {
             Pattern p = Pattern.compile("\\{\\s*\"desc\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"h\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"p\"\\s*:\\s*(\\d+)\\s*,\\s*\"u\"\\s*:\\s*\"(.*?)\"\\s*\\}");
             Matcher m = p.matcher(content);
             while (m.find()) {
-                String host = (m.group(2).isEmpty()) ? "127.0.0.1" : m.group(2);
+                String host = (m.group(2).isEmpty()) ? "127.0.0.1" : m.group(2); // 手动输入 IP 或自动获取
                 startBot(m.group(1), host, Integer.parseInt(m.group(3)), m.group(4));
             }
         } catch (Exception ignored) {}
@@ -42,26 +42,24 @@ public class CoreLink extends JavaPlugin {
         new Thread(() -> {
             while (true) {
                 try (Socket s = new Socket()) {
-                    // 1:1 复刻 JS 的 TCP 配置
                     s.setTcpNoDelay(true);
-                    s.setKeepAlive(true);
-                    s.setSoTimeout(15000); 
-                    
+                    s.setSoTimeout(30000); 
                     s.connect(new InetSocketAddress(host, port), 10000);
+                    
                     DataOutputStream out = new DataOutputStream(s.getOutputStream());
                     DataInputStream in = new DataInputStream(s.getInputStream());
 
-                    // STEP 1: Handshake
+                    // --- STEP 1: Handshake (JS: client.write('handshake', ...)) ---
                     ByteArrayOutputStream b = new ByteArrayOutputStream();
                     DataOutputStream pkg = new DataOutputStream(b);
                     writeVarInt(pkg, 0x00);
-                    writeVarInt(pkg, 774); // 1.21.11
+                    writeVarInt(pkg, 774); 
                     writeString(pkg, host);
                     pkg.writeShort(port);
-                    writeVarInt(pkg, 2); // 状态: Login
+                    writeVarInt(pkg, 2); 
                     sendPacket(out, b.toByteArray());
 
-                    // STEP 2: Login Start
+                    // --- STEP 2: Login Start (JS: client.write('login_start', ...)) ---
                     b.reset();
                     writeVarInt(pkg, 0x00);
                     writeString(pkg, user);
@@ -70,64 +68,64 @@ public class CoreLink extends JavaPlugin {
                     pkg.writeLong(id.getLeastSignificantBits());
                     sendPacket(out, b.toByteArray());
 
-                    logToFile("[" + desc + "] 模拟 JS 流程发起登录: " + user);
+                    logToFile("[" + desc + "] 已执行 JS 登录步骤 1 & 2");
 
-                    int state = 2; // 2: Login, 3: Config, 4: Play
+                    int protocolState = 2; // 2:LOGIN, 3:CONFIG, 4:PLAY
 
                     while (!s.isClosed()) {
-                        int len = readVarInt(in);
-                        if (len <= 0) break;
+                        int packetLen = readVarInt(in);
+                        if (packetLen <= 0) break;
 
-                        // 模仿 JS 的流式处理：必须立即读取完整数据
-                        byte[] data = new byte[len];
-                        in.readFully(data);
-                        DataInputStream pIn = new DataInputStream(new ByteArrayInputStream(data));
+                        // JS 模式：立即读入完整 Buffer 防止流阻塞
+                        byte[] buffer = new byte[packetLen];
+                        in.readFully(buffer);
+                        DataInputStream pIn = new DataInputStream(new ByteArrayInputStream(buffer));
                         int packetId = readVarInt(pIn);
 
-                        if (state == 2) { // LOGIN 阶段
+                        // --- STEP 3: 状态分发逻辑 ---
+                        if (protocolState == 2) {
                             if (packetId == 0x02) { // Login Success
-                                // 核心修正：收到 0x02 必须“秒回” 0x03 才能对齐 Netty 管道
                                 b.reset();
-                                writeVarInt(pkg, 0x03); 
+                                writeVarInt(pkg, 0x03); // JS: login_acknowledged
                                 sendPacket(out, b.toByteArray());
-                                state = 3;
-                                logToFile("[" + desc + "] 状态切换: CONFIGURATION");
+                                protocolState = 3;
+                                logToFile("[" + desc + "] 步骤 3 完成: 切换至 CONFIG");
                             }
                         } 
-                        else if (state == 3) { // CONFIGURATION 阶段
-                            if (packetId == 0x01) { // Config KeepAlive
+                        else if (protocolState == 3) {
+                            if (packetId == 0x01) { // JS: config_keep_alive
                                 long keepId = pIn.readLong();
                                 b.reset();
                                 writeVarInt(pkg, 0x01); 
                                 pkg.writeLong(keepId);
                                 sendPacket(out, b.toByteArray());
-                            } else if (packetId == 0x03) { // Finish Config
+                            } else if (packetId == 0x03) { // JS: config_finished
                                 b.reset();
-                                writeVarInt(pkg, 0x03); // 回复确认
+                                writeVarInt(pkg, 0x03); // JS: finish_configuration (acknowledge)
                                 sendPacket(out, b.toByteArray());
-                                state = 4;
-                                logToFile("[" + desc + "] 状态切换: PLAY (已保持在线)");
+                                protocolState = 4;
+                                logToFile("[" + desc + "] 步骤 4 完成: 进入 PLAY 保持在线");
                             }
                         } 
-                        else if (state == 4) { // PLAY 阶段
-                            if (packetId == 0x26) { // Play KeepAlive
+                        else if (protocolState == 4) {
+                            if (packetId == 0x26) { // JS: keep_alive (Play State)
                                 long keepId = pIn.readLong();
                                 b.reset();
-                                writeVarInt(pkg, 0x15); 
+                                writeVarInt(pkg, 0x15); // JS: keep_alive response ID
                                 pkg.writeLong(keepId);
                                 sendPacket(out, b.toByteArray());
                             }
                         }
                     }
                 } catch (Exception e) {
-                    logToFile("[" + desc + "] 掉线/异常: " + e.getMessage());
+                    logToFile("[" + desc + "] 连接中断: " + e.getMessage() + " (15秒后重连)");
                 }
-                // 15秒重连，避免触发 Connection refused
                 try { Thread.sleep(15000); } catch (Exception ignored) {}
             }
         }).start();
     }
 
+    // --- 协议工具 ---
     private void sendPacket(DataOutputStream out, byte[] data) throws IOException {
         writeVarInt(out, data.length);
         out.write(data);
