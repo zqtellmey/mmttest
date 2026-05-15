@@ -20,7 +20,7 @@ public class CoreLink extends JavaPlugin {
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
         logFile = new File(getDataFolder(), "run.log");
         try { if (!logFile.exists()) logFile.createNewFile(); } catch (IOException ignored) {}
-        logToFile("=== 1:1 深度复刻 JS 协议引擎 (1.21.11) ===");
+        logToFile("=== 1:1 像素级复刻 JS 协议逻辑 (1.21.11) ===");
         loadAccounts();
     }
 
@@ -32,6 +32,7 @@ public class CoreLink extends JavaPlugin {
             Pattern p = Pattern.compile("\\{\\s*\"desc\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"h\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"p\"\\s*:\\s*(\\d+)\\s*,\\s*\"u\"\\s*:\\s*\"(.*?)\"\\s*\\}");
             Matcher m = p.matcher(content);
             while (m.find()) {
+                // 如果 IP 为空，则自动获取 (127.0.0.1)
                 String host = (m.group(2).isEmpty()) ? "127.0.0.1" : m.group(2);
                 startBot(m.group(1), host, Integer.parseInt(m.group(3)), m.group(4));
             }
@@ -42,114 +43,124 @@ public class CoreLink extends JavaPlugin {
         new Thread(() -> {
             while (true) {
                 try (Socket s = new Socket()) {
-                    s.setTcpNoDelay(true);
+                    s.setTcpNoDelay(true); // 极其重要：确保小包（确认包）立即发出，不等待缓冲区
                     s.setSoTimeout(30000);
-                    // 增加缓冲区大小，防止大数据包导致阻塞
-                    s.setReceiveBufferSize(1024 * 512); 
-                    
                     s.connect(new InetSocketAddress(host, port), 10000);
-                    DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()));
-                    DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream()));
+                    
+                    OutputStream out = s.getOutputStream();
+                    InputStream in = s.getInputStream();
 
-                    // --- STEP 1: Handshake ---
-                    ByteArrayOutputStream b = new ByteArrayOutputStream();
-                    DataOutputStream pkg = new DataOutputStream(b);
-                    writeVarInt(pkg, 0x00);
-                    writeVarInt(pkg, 774); // 1.21.11 协议号
-                    writeString(pkg, host);
-                    pkg.writeShort(port);
-                    writeVarInt(pkg, 2); // 下一个状态: Login
-                    sendPacket(out, b.toByteArray());
+                    // --- STEP 1: Handshake (模仿 JS: client.write('handshake', ...)) ---
+                    writePacket(out, buildHandshake(host, port));
 
-                    // --- STEP 2: Login Start ---
-                    b.reset();
-                    writeVarInt(pkg, 0x00);
-                    writeString(pkg, user);
-                    // 严格按照 JS 的 Offline UUID 生成方式
-                    UUID id = UUID.nameUUIDFromBytes(("OfflinePlayer:" + user).getBytes(StandardCharsets.UTF_8));
-                    pkg.writeLong(id.getMostSignificantBits());
-                    pkg.writeLong(id.getLeastSignificantBits());
-                    sendPacket(out, b.toByteArray());
+                    // --- STEP 2: Login Start (模仿 JS: client.write('login_start', ...)) ---
+                    writePacket(out, buildLoginStart(user));
 
-                    logToFile("[" + desc + "] 已执行 JS 登录步骤 1 & 2: " + user);
+                    logToFile("[" + desc + "] 步骤 1&2 已发送 (JS 对齐)");
 
-                    int state = 2; // 2: LOGIN, 3: CONFIG, 4: PLAY
+                    int protocolState = 2; // 2:LOGIN, 3:CONFIG, 4:PLAY
 
                     while (!s.isClosed()) {
-                        int len = readVarInt(in);
-                        if (len <= 0) break;
+                        int size = readVarInt(in);
+                        if (size <= 0) break;
 
-                        // 模仿 JS 的解包过程：必须读完整个包
-                        byte[] buffer = new byte[len];
-                        in.readFully(buffer);
-                        DataInputStream pIn = new DataInputStream(new ByteArrayInputStream(buffer));
+                        // 模仿 JS 的解包：先全部读入内存，保证流的绝对同步
+                        byte[] data = new byte[size];
+                        int read = 0;
+                        while(read < size) {
+                            int r = in.read(data, read, size - read);
+                            if(r == -1) break;
+                            read += r;
+                        }
+
+                        DataInputStream pIn = new DataInputStream(new ByteArrayInputStream(data));
                         int packetId = readVarInt(pIn);
 
-                        if (state == 2) { // LOGIN 阶段
+                        if (protocolState == 2) {
                             if (packetId == 0x02) { // Login Success
-                                // 必须立即发送 Login Acknowledged
-                                b.reset();
-                                writeVarInt(pkg, 0x03); 
-                                sendPacket(out, b.toByteArray());
-                                state = 3;
-                                logToFile("[" + desc + "] 状态切换: CONFIGURATION");
-                            } else if (packetId == 0x03) {
-                                // 兼容服务器发送的 Set Compression 包，此处虽然不启用解压，但必须读过它
-                                logToFile("[" + desc + "] 收到压缩包请求 (已跳过)");
+                                // 必须立即回传 Login Acknowledged (0x03)
+                                writePacket(out, new byte[]{0x03}); 
+                                protocolState = 3;
+                                logToFile("[" + desc + "] 状态: CONFIG (同步完成)");
                             }
                         } 
-                        else if (state == 3) { // CONFIGURATION 阶段
+                        else if (protocolState == 3) {
                             if (packetId == 0x01) { // Config KeepAlive
                                 long keepId = pIn.readLong();
-                                b.reset();
-                                writeVarInt(pkg, 0x01); 
-                                pkg.writeLong(keepId);
-                                sendPacket(out, b.toByteArray());
+                                ByteArrayOutputStream b = new ByteArrayOutputStream();
+                                writeVarInt(b, 0x01);
+                                new DataOutputStream(b).writeLong(keepId);
+                                writePacket(out, b.toByteArray());
                             } else if (packetId == 0x03) { // Finish Configuration
-                                b.reset();
-                                writeVarInt(pkg, 0x03); 
-                                sendPacket(out, b.toByteArray());
-                                state = 4;
-                                logToFile("[" + desc + "] 状态切换: PLAY (上线成功)");
+                                writePacket(out, new byte[]{0x03}); // 回传 Finish Acknowledge
+                                protocolState = 4;
+                                logToFile("[" + desc + "] 状态: PLAY (保持在线)");
                             }
                         } 
-                        else if (state == 4) { // PLAY 阶段
-                            if (packetId == 0x26) { // 1.21.x Play KeepAlive
+                        else if (protocolState == 4) {
+                            if (packetId == 0x26) { // Play KeepAlive
                                 long keepId = pIn.readLong();
-                                b.reset();
-                                writeVarInt(pkg, 0x15); 
-                                pkg.writeLong(keepId);
-                                sendPacket(out, b.toByteArray());
+                                ByteArrayOutputStream b = new ByteArrayOutputStream();
+                                writeVarInt(b, 0x15); // Play 阶段响应 ID 是 0x15
+                                new DataOutputStream(b).writeLong(keepId);
+                                writePacket(out, b.toByteArray());
                             }
                         }
                     }
                 } catch (Exception e) {
-                    logToFile("[" + desc + "] 连接中断: " + (e.getMessage() == null ? "服务器断开" : e.getMessage()) + " (15秒后重连)");
+                    logToFile("[" + desc + "] 异常中断: " + e.getMessage());
                 }
-                // 延长重连间隔，防止被服务器屏蔽
                 try { Thread.sleep(15000); } catch (Exception ignored) {}
             }
         }).start();
     }
 
-    private void sendPacket(DataOutputStream out, byte[] data) throws IOException {
+    // --- 数据包构造 (1:1 像素级复刻 JS 结构) ---
+
+    private byte[] buildHandshake(String host, int port) throws IOException {
+        ByteArrayOutputStream b = new ByteArrayOutputStream();
+        writeVarInt(b, 0x00); // Packet ID
+        writeVarInt(b, 774);  // Protocol 1.21.11
+        writeString(b, host);
+        b.write((port >> 8) & 0xFF);
+        b.write(port & 0xFF);
+        writeVarInt(b, 2);    // Next State: Login
+        return b.toByteArray();
+    }
+
+    private byte[] buildLoginStart(String user) throws IOException {
+        ByteArrayOutputStream b = new ByteArrayOutputStream();
+        writeVarInt(b, 0x00); // Packet ID
+        writeString(b, user);
+        // 离线 UUID (JS 版固定逻辑)
+        UUID id = UUID.nameUUIDFromBytes(("OfflinePlayer:" + user).getBytes(StandardCharsets.UTF_8));
+        DataOutputStream d = new DataOutputStream(b);
+        d.writeLong(id.getMostSignificantBits());
+        d.writeLong(id.getLeastSignificantBits());
+        return b.toByteArray();
+    }
+
+    // --- 协议工具 ---
+
+    private void writePacket(OutputStream out, byte[] data) throws IOException {
         writeVarInt(out, data.length);
         out.write(data);
-        out.flush(); // JS 版中 write 是带 flush 逻辑的
+        out.flush(); // 必须强制 Flush，确保服务器立刻收到 Acknowledge
     }
 
-    private void writeVarInt(DataOutputStream out, int v) throws IOException {
+    private void writeVarInt(OutputStream out, int v) throws IOException {
         while ((v & 0xFFFFFF80) != 0L) {
-            out.writeByte((v & 0x7F) | 0x80);
+            out.write((v & 0x7F) | 0x80);
             v >>>= 7;
         }
-        out.writeByte(v & 0x7F);
+        out.write(v & 0x7F);
     }
 
-    private int readVarInt(DataInputStream in) throws IOException {
+    private int readVarInt(InputStream in) throws IOException {
         int i = 0, j = 0;
         while (true) {
-            int k = in.readByte();
+            int k = in.read();
+            if (k == -1) return -1;
             i |= (k & 0x7F) << j++ * 7;
             if (j > 5) return -1;
             if ((k & 0x80) != 128) break;
@@ -157,7 +168,7 @@ public class CoreLink extends JavaPlugin {
         return i;
     }
 
-    private void writeString(DataOutputStream out, String s) throws IOException {
+    private void writeString(OutputStream out, String s) throws IOException {
         byte[] b = s.getBytes(StandardCharsets.UTF_8);
         writeVarInt(out, b.length);
         out.write(b);
