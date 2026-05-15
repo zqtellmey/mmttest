@@ -17,8 +17,17 @@ jobs:
         distribution: 'temurin'
         cache: maven
 
-    # Maven 会根据 pom.xml 中新加的 https://repo.opencollab.dev/main/ 路径去搜索依赖
-    - name: Build with Maven
+    # 第一步：直接克隆官方源码并现场编译那个 21MB 的胖包
+    - name: Build MCProtocolLib Locally
+      run: |
+        git clone https://github.com/GeyserMC/MCProtocolLib.git
+        cd MCProtocolLib
+        # 编译并安装到本地 Maven 仓库，这会生成完整的 20MB+ 环境
+        mvn clean install -DskipTests
+        cd ..
+
+    # 第二步：编译你的插件
+    - name: Build Your Plugin
       run: mvn -B package --file pom.xml
 
     - name: Upload Artifact
