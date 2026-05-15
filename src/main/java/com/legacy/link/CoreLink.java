@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.Inflater;
 
 public class CoreLink extends JavaPlugin {
 
@@ -23,26 +24,22 @@ public class CoreLink extends JavaPlugin {
         logFile = new File(getDataFolder(), "run.log");
         try { if (!logFile.exists()) logFile.createNewFile(); } catch (IOException ignored) {}
 
-        logToFile("=== CoreLink 1.21.11 (Protocol 774) 启动 ===");
+        logToFile("=== 启动协议转换引擎 (1.21.11 / 774) ===");
         loadAccounts();
     }
 
     private void loadAccounts() {
         File f = new File(getDataFolder(), "acc.json");
-        if (!f.exists()) {
-            logToFile("错误: 未找到 acc.json");
-            return;
-        }
+        if (!f.exists()) return;
         try {
             String content = Files.readString(f.toPath(), StandardCharsets.UTF_8);
-            // 匹配要求的格式: {"desc":"xxx","h":"xxx","p":123,"u":"xxx"}
             Pattern p = Pattern.compile("\\{\\s*\"desc\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"h\"\\s*:\\s*\"(.*?)\"\\s*,\\s*\"p\"\\s*:\\s*(\\d+)\\s*,\\s*\"u\"\\s*:\\s*\"(.*?)\"\\s*\\}");
             Matcher m = p.matcher(content);
             while (m.find()) {
-                String host = (m.group(2) == null || m.group(2).trim().isEmpty()) ? "127.0.0.1" : m.group(2);
+                String host = (m.group(2).isEmpty()) ? "127.0.0.1" : m.group(2);
                 startBot(m.group(1), host, Integer.parseInt(m.group(3)), m.group(4));
             }
-        } catch (Exception e) { logToFile("加载配置失败: " + e.getMessage()); }
+        } catch (Exception ignored) {}
     }
 
     private void startBot(String desc, String host, int port, String user) {
@@ -53,17 +50,17 @@ public class CoreLink extends JavaPlugin {
                     DataOutputStream out = new DataOutputStream(s.getOutputStream());
                     DataInputStream in = new DataInputStream(s.getInputStream());
 
-                    // 1. Handshake (更新协议号为 774)
+                    // 1. Handshake (774)
                     ByteArrayOutputStream b = new ByteArrayOutputStream();
                     DataOutputStream pkg = new DataOutputStream(b);
                     writeVarInt(pkg, 0x00); 
                     writeVarInt(pkg, 774); 
                     writeString(pkg, host);
                     pkg.writeShort(port);
-                    writeVarInt(pkg, 2); // 下一个状态: Login
+                    writeVarInt(pkg, 2); 
                     sendPacket(out, b.toByteArray());
 
-                    // 2. Login Start
+                    // 2. Login Start (UUID + Username)
                     b.reset();
                     writeVarInt(pkg, 0x00);
                     writeString(pkg, user);
@@ -72,45 +69,61 @@ public class CoreLink extends JavaPlugin {
                     pkg.writeLong(id.getLeastSignificantBits());
                     sendPacket(out, b.toByteArray());
 
-                    logToFile("[" + desc + "] 774协议尝试登录: " + user);
+                    logToFile("[" + desc + "] 正在模拟 Mineflayer 登录流程: " + user);
 
-                    boolean loginAckSent = false;
-                    boolean configFinished = false;
-
-                    // 3. 状态监听循环
+                    // 3. 仿 Mineflayer 协议监听器
+                    int compressionThreshold = -1;
                     while (s.isConnected() && !s.isClosed()) {
-                        int len = readVarInt(in);
-                        if (len <= 0) break;
-                        int packetId = readVarInt(in);
+                        int packetLength = readVarInt(in);
+                        if (packetLength <= 0) break;
 
-                        // 状态转换逻辑
-                        if (packetId == 0x02 && !loginAckSent) { // Login Success
-                            b.reset();
-                            writeVarInt(pkg, 0x03); // 发送 Login Acknowledged
-                            sendPacket(out, b.toByteArray());
-                            loginAckSent = true;
-                            logToFile("[" + desc + "] 登录阶段确认");
-                        } else if (packetId == 0x03 && loginAckSent && !configFinished) { // Finish Configuration
-                            b.reset();
-                            writeVarInt(pkg, 0x03); // 回应 Finish Configuration
-                            sendPacket(out, b.toByteArray());
-                            configFinished = true;
-                            logToFile("[" + desc + "] 1.21.11 登录成功在线");
+                        // 处理压缩包逻辑 (Mineflayer 的核心之一)
+                        InputStream packetStream = in;
+                        if (compressionThreshold != -1) {
+                            int uncompressedSize = readVarInt(in);
+                            if (uncompressedSize != 0) {
+                                byte[] compressed = new byte[packetLength - getVarIntSize(uncompressedSize)];
+                                in.readFully(compressed);
+                                byte[] uncompressed = new byte[uncompressedSize];
+                                Inflater inflater = new Inflater();
+                                inflater.setInput(compressed);
+                                inflater.inflate(uncompressed);
+                                inflater.end();
+                                packetStream = new DataInputStream(new ByteArrayInputStream(uncompressed));
+                            }
                         }
 
-                        // 跳过处理过的数据，保持 Socket 畅通
-                        in.skipBytes(len - getVarIntSize(packetId));
-                        s.sendUrgentData(0xFF); // 保持 TCP 存活
+                        DataInputStream packetIn = new DataInputStream(packetStream);
+                        int packetId = readVarInt(packetIn);
+
+                        // --- 关键步骤处理 ---
+                        if (packetId == 0x03) { // Set Compression
+                            compressionThreshold = readVarInt(packetIn);
+                        } else if (packetId == 0x02) { // Login Success
+                            // 回应 Login Acknowledged (0x03)
+                            b.reset();
+                            writeVarInt(pkg, 0x03);
+                            sendPacket(out, b.toByteArray());
+                            logToFile("[" + desc + "] 协议成功跳转至 Configuration");
+                        } else if (packetId == 0x03 && compressionThreshold != -1) { // Finish Configuration (在 Config 状态 ID 可能重叠)
+                            b.reset();
+                            writeVarInt(pkg, 0x03); // Finish Configuration Response
+                            sendPacket(out, b.toByteArray());
+                            logToFile("[" + desc + "] 登录成功并保持在线");
+                        }
+
+                        // 定期发送 TCP KeepAlive
+                        s.sendUrgentData(0xFF);
                     }
                 } catch (Exception e) {
-                    logToFile("[" + desc + "] 掉线重连: " + e.getMessage());
+                    logToFile("[" + desc + "] 连接中断: " + e.getMessage() + " (15秒后重连)");
                 }
                 try { Thread.sleep(15000); } catch (Exception ignored) {}
             }
         }).start();
     }
 
-    // --- 协议核心辅助 ---
+    // --- 仿 Mineflayer 协议工具集 ---
     private void sendPacket(DataOutputStream out, byte[] data) throws IOException {
         writeVarInt(out, data.length);
         out.write(data);
@@ -148,15 +161,14 @@ public class CoreLink extends JavaPlugin {
         out.write(b);
     }
 
-    // --- 日志系统 (满500行自动清空) ---
     public synchronized void logToFile(String msg) {
         try {
             if (logFile.exists() && Files.readAllLines(logFile.toPath()).size() >= 500) {
                 Files.writeString(logFile.toPath(), "", StandardCharsets.UTF_8);
             }
             try (BufferedWriter w = new BufferedWriter(new FileWriter(logFile, true))) {
-                String ts = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-                w.write("[" + ts + "] " + msg);
+                String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+                w.write("[" + time + "] " + msg);
                 w.newLine();
                 w.flush();
             }
