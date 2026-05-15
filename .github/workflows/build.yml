@@ -17,20 +17,7 @@ jobs:
         distribution: 'temurin'
         cache: maven
 
-    - name: Download Shaded Library
-      run: |
-        mkdir -p libs
-        # 使用 -L 强制跟随重定向，--retry 增加稳定性
-        curl -L --retry 3 "https://repo.opencollab.dev/maven-snapshots/org/geysermc/mcprotocollib/protocol/master-SNAPSHOT/protocol-master-SNAPSHOT.jar" -o libs/MCProtocolLib-master-SNAPSHOT.jar
-        
-        # 验证文件大小：如果小于 10MB，说明下载的是错误页面或损坏文件
-        FILESIZE=$(stat -c%s "libs/MCProtocolLib-master-SNAPSHOT.jar")
-        echo "Downloaded file size: $FILESIZE bytes"
-        if [ $FILESIZE -lt 10000000 ]; then
-          echo "ERROR: The downloaded JAR is too small ($FILESIZE bytes). It might be a broken link."
-          exit 1
-        fi
-
+    # 直接下令组装。Maven 会自动访问官网仓库并处理一切，不再需要 curl 下载
     - name: Build with Maven
       run: mvn -B package --file pom.xml
 
