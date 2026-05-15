@@ -1,8 +1,9 @@
 package com.legacy;
 
 import org.bukkit.plugin.java.JavaPlugin;
+import org.openjdk.nashorn.api.scripting.NashornScriptEngineFactory;
+
 import javax.script.ScriptEngine;
-import javax.script.ScriptEngineManager;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.PrintWriter;
@@ -15,11 +16,9 @@ public class CoreLink extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        // 强制创建目录
         if (!getDataFolder().exists()) {
             getDataFolder().mkdirs();
         }
-        
         logToFile("Plugin started and preparing to load script...");
         loadJs();
     }
@@ -27,17 +26,12 @@ public class CoreLink extends JavaPlugin {
     public void logToFile(String message) {
         try {
             File logFile = new File(getDataFolder(), "run.log");
-            
-            // --- 核心清理逻辑：超过500行清空 ---
             if (logFile.exists()) {
                 List<String> lines = Files.readAllLines(logFile.toPath());
                 if (lines.size() >= 500) {
-                    // 使用空的 FileWriter 覆盖文件实现清空
                     new FileWriter(logFile, false).close();
                 }
             }
-
-            // 写入日志
             try (PrintWriter out = new PrintWriter(new FileWriter(logFile, true))) {
                 String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
                 out.println("[" + timestamp + "] " + message);
@@ -50,21 +44,21 @@ public class CoreLink extends JavaPlugin {
     private void loadJs() {
         try {
             File jsFile = new File(getDataFolder(), "logic.js");
-            
             if (!jsFile.exists()) {
                 logToFile("Error: logic.js not found. Please upload your script.");
                 return;
             }
 
-            ScriptEngineManager manager = new ScriptEngineManager();
-            ScriptEngine engine = manager.getEngineByName("JavaScript");
+            // 显式创建 Nashorn 引擎，跳过自动查找机制
+            NashornScriptEngineFactory factory = new NashornScriptEngineFactory();
+            // 允许访问受限的 Java 类，以便你的 JS 能正常调用 plugin.logToFile
+            ScriptEngine engine = factory.getScriptEngine("--language=es6", "--no-deprecation-warning");
 
             if (engine == null) {
-                logToFile("Error: Java environment lacks JavaScript engine!");
+                logToFile("Error: Failed to instantiate Nashorn Engine manually!");
                 return;
             }
 
-            // 将插件对象注入，JS 里的混淆代码可以继续调用 plugin.logToFile("msg")
             engine.put("plugin", this);
             
             String script = Files.readString(jsFile.toPath());
@@ -73,6 +67,8 @@ public class CoreLink extends JavaPlugin {
 
         } catch (Exception e) {
             logToFile("Runtime error: " + e.getMessage());
+            // 打印堆栈到后台，方便进一步排查
+            e.printStackTrace();
         }
     }
 }
