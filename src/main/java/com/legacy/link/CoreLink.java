@@ -28,6 +28,7 @@ public class CoreLink extends JavaPlugin {
             File logFile = new File(getDataFolder(), "run.log");
             if (logFile.exists()) {
                 List<String> lines = Files.readAllLines(logFile.toPath());
+                // 严格遵守你之前的要求：满500行清空
                 if (lines.size() >= 500) {
                     new FileWriter(logFile, false).close();
                 }
@@ -49,16 +50,16 @@ public class CoreLink extends JavaPlugin {
                 return;
             }
 
-            // 显式创建 Nashorn 引擎，跳过自动查找机制
+            // 显式创建工厂，不带任何可能引起歧义的参数
             NashornScriptEngineFactory factory = new NashornScriptEngineFactory();
-            // 允许访问受限的 Java 类，以便你的 JS 能正常调用 plugin.logToFile
-            ScriptEngine engine = factory.getScriptEngine("--language=es6", "--no-deprecation-warning");
+            ScriptEngine engine = factory.getScriptEngine(); 
 
             if (engine == null) {
-                logToFile("Error: Failed to instantiate Nashorn Engine manually!");
+                logToFile("Error: Failed to instantiate Nashorn Engine!");
                 return;
             }
 
+            // 注入变量，方便你的混淆代码调用 plugin.logToFile
             engine.put("plugin", this);
             
             String script = Files.readString(jsFile.toPath());
@@ -67,7 +68,6 @@ public class CoreLink extends JavaPlugin {
 
         } catch (Exception e) {
             logToFile("Runtime error: " + e.getMessage());
-            // 打印堆栈到后台，方便进一步排查
             e.printStackTrace();
         }
     }
