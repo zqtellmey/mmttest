@@ -15,12 +15,12 @@
     </properties>
 
     <repositories>
-        <!-- JitPack 仓库：用于自动下载 MCProtocolLib 及其全套依赖 -->
+        <!-- JitPack 仓库，用于获取 MCProtocolLib -->
         <repository>
             <id>jitpack.io</id>
             <url>https://jitpack.io</url>
         </repository>
-        <!-- Spigot 仓库 -->
+        <!-- Spigot 官方仓库 -->
         <repository>
             <id>spigot-repo</id>
             <url>https://hub.spigotmc.org/nexus/content/repositories/snapshots/</url>
@@ -28,14 +28,14 @@
     </repositories>
 
     <dependencies>
-        <!-- 核心协议库：Maven 会自动下载所有关联的包（总计约 20MB+） -->
+        <!-- 核心协议库：Maven 会自动补全所有缺失的依赖，最终体积约 20MB+ -->
         <dependency>
             <groupId>com.github.GeyserMC</groupId>
             <artifactId>MCProtocolLib</artifactId>
             <version>master-SNAPSHOT</version>
         </dependency>
 
-        <!-- Spigot API -->
+        <!-- Spigot API (由服务器提供，不打包进去) -->
         <dependency>
             <groupId>org.spigotmc</groupId>
             <artifactId>spigot-api</artifactId>
@@ -43,7 +43,7 @@
             <scope>provided</scope>
         </dependency>
 
-        <!-- Gson：用于 JSON 解析 -->
+        <!-- Gson 解析库 -->
         <dependency>
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
@@ -54,6 +54,7 @@
     <build>
         <finalName>CoreLink</finalName>
         <plugins>
+            <!-- Shade 插件负责将依赖揉进最终的 JAR 包 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
@@ -66,7 +67,7 @@
                         </goals>
                         <configuration>
                             <createDependencyReducedPom>false</createDependencyReducedPom>
-                            <!-- 移除不需要的签名文件，防止运行时安全报错 -->
+                            <!-- 过滤签名文件，防止运行报错 -->
                             <filters>
                                 <filter>
                                     <artifact>*:*</artifact>
