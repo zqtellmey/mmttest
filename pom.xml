@@ -14,10 +14,15 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
 
-    <!-- 官网指定的零件仓库 -->
     <repositories>
+        <!-- 官网指定的正式版仓库 -->
         <repository>
-            <id>opencollab-snapshot</id>
+            <id>opencollab</id>
+            <url>https://repo.opencollab.dev/main/</url>
+        </repository>
+        <!-- 官网指定的快照版仓库（必须包含这个才能找到最新的 master 分支构建） -->
+        <repository>
+            <id>opencollab-snapshots</id>
             <url>https://repo.opencollab.dev/maven-snapshots/</url>
         </repository>
         <repository>
@@ -27,10 +32,11 @@
     </repositories>
 
     <dependencies>
-        <!-- 核心协议包：Maven 会根据它的依赖树自动下载那 20MB 的 Netty、Adventure 等 -->
+        <!-- 使用官网标准的 groupId 和 artifactId -->
         <dependency>
             <groupId>org.geysermc.mcprotocollib</groupId>
             <artifactId>protocol</artifactId>
+            <!-- 建议使用具体版本或最新的快照版本 -->
             <version>master-SNAPSHOT</version>
         </dependency>
 
@@ -63,7 +69,6 @@
                         </goals>
                         <configuration>
                             <createDependencyReducedPom>false</createDependencyReducedPom>
-                            <!-- 必须过滤掉签名文件，否则运行时会报 SecurityException -->
                             <filters>
                                 <filter>
                                     <artifact>*:*</artifact>
