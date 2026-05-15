@@ -13,7 +13,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class CoreLink extends JavaPlugin {
-
     private File logFile;
 
     @Override
@@ -21,8 +20,7 @@ public class CoreLink extends JavaPlugin {
         if (!getDataFolder().exists()) getDataFolder().mkdirs();
         logFile = new File(getDataFolder(), "run.log");
         try { if (!logFile.exists()) logFile.createNewFile(); } catch (IOException ignored) {}
-
-        logToFile("=== 深度模拟 JS 端处理循环启动 (774) ===");
+        logToFile("=== 严格复刻 JS 版协议引擎 (1.21.11) ===");
         loadAccounts();
     }
 
@@ -44,22 +42,22 @@ public class CoreLink extends JavaPlugin {
         new Thread(() -> {
             while (true) {
                 try (Socket s = new Socket()) {
+                    s.setTcpNoDelay(true);
                     s.connect(new InetSocketAddress(host, port), 10000);
-                    s.setSoTimeout(30000); // 增加 Socket 超时控制
                     DataOutputStream out = new DataOutputStream(s.getOutputStream());
                     DataInputStream in = new DataInputStream(s.getInputStream());
 
-                    // --- 1. Handshake ---
+                    // STEP 1: Handshake
                     ByteArrayOutputStream b = new ByteArrayOutputStream();
                     DataOutputStream pkg = new DataOutputStream(b);
                     writeVarInt(pkg, 0x00);
-                    writeVarInt(pkg, 774);
+                    writeVarInt(pkg, 774); // 1.21.11
                     writeString(pkg, host);
                     pkg.writeShort(port);
                     writeVarInt(pkg, 2); 
                     sendPacket(out, b.toByteArray());
 
-                    // --- 2. Login Start ---
+                    // STEP 2: Login Start
                     b.reset();
                     writeVarInt(pkg, 0x00);
                     writeString(pkg, user);
@@ -68,71 +66,64 @@ public class CoreLink extends JavaPlugin {
                     pkg.writeLong(id.getLeastSignificantBits());
                     sendPacket(out, b.toByteArray());
 
-                    logToFile("[" + desc + "] 模拟 JS 发送登录: " + user);
+                    logToFile("[" + desc + "] 正在按 JS 流程登录: " + user);
 
-                    int state = 2; // 2:LOGIN, 3:CONFIG, 4:PLAY
+                    int protocolState = 2; // 2:Login, 3:Config, 4:Play
 
-                    while (!s.isClosed()) {
+                    while (s.isConnected() && !s.isClosed()) {
                         int len = readVarInt(in);
                         if (len <= 0) break;
 
-                        // 将当前包读取到内存，防止长包阻塞
-                        byte[] data = new byte[len];
-                        in.readFully(data);
-                        DataInputStream packetIn = new DataInputStream(new ByteArrayInputStream(data));
+                        // 模仿 JS 的 Buffer 接收，必须读完整个包
+                        byte[] buffer = new byte[len];
+                        in.readFully(buffer);
+                        DataInputStream packetIn = new DataInputStream(new ByteArrayInputStream(buffer));
                         int packetId = readVarInt(packetIn);
 
-                        // --- 3. 仿 Mineflayer 内部事件处理器 ---
-                        if (state == 2) { // LOGIN 阶段
+                        if (protocolState == 2) { // LOGIN
                             if (packetId == 0x02) { // Login Success
                                 b.reset();
-                                writeVarInt(pkg, 0x03); // Acknowledge Login
+                                writeVarInt(pkg, 0x03); // 发送 Login Acknowledged (JS: login_acknowledged)
                                 sendPacket(out, b.toByteArray());
-                                state = 3;
-                                logToFile("[" + desc + "] 进入配置阶段...");
-                            } else if (packetId == 0x03) { // Compression
-                                // 忽略压缩设置以简化 Java 实现
+                                protocolState = 3;
+                                logToFile("[" + desc + "] 进入配置模式");
                             }
                         } 
-                        else if (state == 3) { // CONFIGURATION 阶段
-                            if (packetId == 0x03) { // Finish Configuration
+                        else if (protocolState == 3) { // CONFIGURATION
+                            if (packetId == 0x01) { // Config KeepAlive
+                                long keepId = packetIn.readLong();
                                 b.reset();
-                                writeVarInt(pkg, 0x03); // Acknowledge Finish Config
+                                writeVarInt(pkg, 0x01); // 回复 Config KeepAlive
+                                pkg.writeLong(keepId);
                                 sendPacket(out, b.toByteArray());
-                                state = 4;
-                                logToFile("[" + desc + "] 登录成功，已保持在线");
-                            } else if (packetId == 0x01) { // Keep Alive (Config 阶段的心跳)
-                                long keepAliveId = packetIn.readLong();
+                            } else if (packetId == 0x03) { // Finish Configuration
                                 b.reset();
-                                writeVarInt(pkg, 0x01); 
-                                pkg.writeLong(keepAliveId);
+                                writeVarInt(pkg, 0x03); // 回复 Finish Configuration (JS: finish_configuration)
                                 sendPacket(out, b.toByteArray());
-                            } else if (packetId == 0x00) { // Plugin Message
-                                // 模拟 JS 响应：忽略但维持流，不处理特定的 Brand 信息
+                                protocolState = 4;
+                                logToFile("[" + desc + "] 成功进入游戏状态");
                             }
+                            // 其他 ID 如 0x00(PluginMessage), 0x07(RegistryData) 等由 buffer 自动消化
                         } 
-                        else if (state == 4) { // PLAY 阶段
-                            if (packetId == 0x26) { // Play 阶段 Keep Alive (1.21.x ID 为 0x26)
-                                long keepAliveId = packetIn.readLong();
+                        else if (protocolState == 4) { // PLAY
+                            if (packetId == 0x26) { // Play KeepAlive
+                                long keepId = packetIn.readLong();
                                 b.reset();
-                                writeVarInt(pkg, 0x15); // 回应包 ID (1.21.x Play KeepAlive Response 通常是 0x15)
-                                pkg.writeLong(keepAliveId);
+                                writeVarInt(pkg, 0x15); // 回复 Play KeepAlive Response
+                                pkg.writeLong(keepId);
                                 sendPacket(out, b.toByteArray());
                             }
                         }
-                        
-                        // 每次循环末尾发送紧急数据维持 TCP 连接
-                        s.sendUrgentData(0xFF);
                     }
                 } catch (Exception e) {
-                    logToFile("[" + desc + "] 掉线: " + e.getMessage());
+                    logToFile("[" + desc + "] 状态异常: " + e.getMessage());
                 }
-                try { Thread.sleep(15000); } catch (InterruptedException ignored) {}
+                try { Thread.sleep(15000); } catch (Exception ignored) {}
             }
         }).start();
     }
 
-    // --- 工具类：严格遵循 Minecraft 协议 ---
+    // --- 协议封装函数 ---
     private void sendPacket(DataOutputStream out, byte[] data) throws IOException {
         writeVarInt(out, data.length);
         out.write(data);
@@ -158,12 +149,6 @@ public class CoreLink extends JavaPlugin {
         return i;
     }
 
-    private int getVarIntSize(int v) {
-        if ((v & 0xFFFFFF80) == 0) return 1;
-        if ((v & 0xFFFFC000) == 0) return 2;
-        return 3;
-    }
-
     private void writeString(DataOutputStream out, String s) throws IOException {
         byte[] b = s.getBytes(StandardCharsets.UTF_8);
         writeVarInt(out, b.length);
@@ -179,7 +164,6 @@ public class CoreLink extends JavaPlugin {
                 String ts = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
                 w.write("[" + ts + "] " + msg);
                 w.newLine();
-                w.flush();
             }
         } catch (Exception ignored) {}
     }
