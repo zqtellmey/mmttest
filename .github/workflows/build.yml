@@ -1,4 +1,4 @@
-name: Build Paper Plugin
+name: Build Plugin Project
 on:
   push:
     branches: [ "main" ]
@@ -7,16 +7,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - name: Set up JDK 21
+    - name: Set up Environment
       uses: actions/setup-java@v4
       with:
         java-version: '21'
         distribution: 'temurin'
         cache: maven
-    - name: Build with Maven
+    - name: Execute Compile
       run: mvn -B package --file pom.xml
-    - name: Upload Artifact
+    - name: Upload Output
       uses: actions/upload-artifact@v4
       with:
-        name: CoreLink-Plugin
+        name: CoreLink-Package
         path: target/CoreLink.jar
