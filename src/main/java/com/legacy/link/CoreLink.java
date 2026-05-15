@@ -8,7 +8,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.List;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -23,7 +22,7 @@ public class CoreLink extends JavaPlugin {
         logFile = new File(getDataFolder(), "run.log");
         try { if (!logFile.exists()) logFile.createNewFile(); } catch (IOException ignored) {}
 
-        logToFile("=== 按照 JS 版逻辑启动协议引擎 (774) ===");
+        logToFile("=== 深度模拟 JS 端处理循环启动 (774) ===");
         loadAccounts();
     }
 
@@ -46,20 +45,21 @@ public class CoreLink extends JavaPlugin {
             while (true) {
                 try (Socket s = new Socket()) {
                     s.connect(new InetSocketAddress(host, port), 10000);
+                    s.setSoTimeout(30000); // 增加 Socket 超时控制
                     DataOutputStream out = new DataOutputStream(s.getOutputStream());
                     DataInputStream in = new DataInputStream(s.getInputStream());
 
-                    // --- STEP 1: Handshake (与 JS 版完全一致) ---
+                    // --- 1. Handshake ---
                     ByteArrayOutputStream b = new ByteArrayOutputStream();
                     DataOutputStream pkg = new DataOutputStream(b);
-                    writeVarInt(pkg, 0x00); 
-                    writeVarInt(pkg, 774); // 协议号 1.21.11
+                    writeVarInt(pkg, 0x00);
+                    writeVarInt(pkg, 774);
                     writeString(pkg, host);
                     pkg.writeShort(port);
-                    writeVarInt(pkg, 2); // 状态: Login
+                    writeVarInt(pkg, 2); 
                     sendPacket(out, b.toByteArray());
 
-                    // --- STEP 2: Login Start ---
+                    // --- 2. Login Start ---
                     b.reset();
                     writeVarInt(pkg, 0x00);
                     writeString(pkg, user);
@@ -68,61 +68,71 @@ public class CoreLink extends JavaPlugin {
                     pkg.writeLong(id.getLeastSignificantBits());
                     sendPacket(out, b.toByteArray());
 
-                    logToFile("[" + desc + "] 模拟 JS 端发送登录请求: " + user);
+                    logToFile("[" + desc + "] 模拟 JS 发送登录: " + user);
 
-                    // --- STEP 3: 模拟 JS 的状态机监听 (与 JS 版逻辑一致) ---
-                    int currentState = 2; // 2: LOGIN, 3: CONFIGURATION, 4: PLAY
-                    
-                    while (s.isConnected() && !s.isClosed()) {
+                    int state = 2; // 2:LOGIN, 3:CONFIG, 4:PLAY
+
+                    while (!s.isClosed()) {
                         int len = readVarInt(in);
                         if (len <= 0) break;
-                        
-                        int packetId = readVarInt(in);
 
-                        // 状态机处理
-                        if (currentState == 2) { // LOGIN 状态
-                            if (packetId == 0x02) { // Login Success (JS: onLoginSuccess)
-                                // 发送 Login Acknowledged (ID: 0x03)
+                        // 将当前包读取到内存，防止长包阻塞
+                        byte[] data = new byte[len];
+                        in.readFully(data);
+                        DataInputStream packetIn = new DataInputStream(new ByteArrayInputStream(data));
+                        int packetId = readVarInt(packetIn);
+
+                        // --- 3. 仿 Mineflayer 内部事件处理器 ---
+                        if (state == 2) { // LOGIN 阶段
+                            if (packetId == 0x02) { // Login Success
                                 b.reset();
-                                writeVarInt(pkg, 0x03);
+                                writeVarInt(pkg, 0x03); // Acknowledge Login
                                 sendPacket(out, b.toByteArray());
-                                currentState = 3; // 切换到 CONFIG 状态
-                                logToFile("[" + desc + "] 登录成功，切换至配置状态");
+                                state = 3;
+                                logToFile("[" + desc + "] 进入配置阶段...");
+                            } else if (packetId == 0x03) { // Compression
+                                // 忽略压缩设置以简化 Java 实现
                             }
                         } 
-                        else if (currentState == 3) { // CONFIGURATION 状态 (1.21+ 核心步奏)
-                            if (packetId == 0x03) { // Finish Configuration (JS: onFinishConfig)
-                                // 发送 Finish Configuration (ID: 0x03) 回应服务器
+                        else if (state == 3) { // CONFIGURATION 阶段
+                            if (packetId == 0x03) { // Finish Configuration
                                 b.reset();
-                                writeVarInt(pkg, 0x03);
+                                writeVarInt(pkg, 0x03); // Acknowledge Finish Config
                                 sendPacket(out, b.toByteArray());
-                                currentState = 4; // 切换到 PLAY 状态
-                                logToFile("[" + desc + "] 配置完成，已进入在线状态");
+                                state = 4;
+                                logToFile("[" + desc + "] 登录成功，已保持在线");
+                            } else if (packetId == 0x01) { // Keep Alive (Config 阶段的心跳)
+                                long keepAliveId = packetIn.readLong();
+                                b.reset();
+                                writeVarInt(pkg, 0x01); 
+                                pkg.writeLong(keepAliveId);
+                                sendPacket(out, b.toByteArray());
+                            } else if (packetId == 0x00) { // Plugin Message
+                                // 模拟 JS 响应：忽略但维持流，不处理特定的 Brand 信息
                             }
-                            // 忽略配置阶段的其他包 (Registry Data, Tags 等)，保持流对齐
-                        }
-                        else if (currentState == 4) { // PLAY 状态 (保持在线)
-                            if (packetId == 0x24) { // Keep Alive (JS: onKeepAlive)
-                                // 此处应回应 KeepAlive，但简易版通过跳过字节维持心跳
+                        } 
+                        else if (state == 4) { // PLAY 阶段
+                            if (packetId == 0x26) { // Play 阶段 Keep Alive (1.21.x ID 为 0x26)
+                                long keepAliveId = packetIn.readLong();
+                                b.reset();
+                                writeVarInt(pkg, 0x15); // 回应包 ID (1.21.x Play KeepAlive Response 通常是 0x15)
+                                pkg.writeLong(keepAliveId);
+                                sendPacket(out, b.toByteArray());
                             }
                         }
-
-                        // 关键：严格按照包长度跳过未处理字节，确保流不会错位 (JS 内部 Buffer 操作)
-                        int headLen = getVarIntSize(packetId);
-                        in.skipBytes(len - headLen);
                         
-                        // 定期发送 TCP 存活信号
+                        // 每次循环末尾发送紧急数据维持 TCP 连接
                         s.sendUrgentData(0xFF);
                     }
                 } catch (Exception e) {
-                    logToFile("[" + desc + "] 连接中断: " + e.getMessage() + " (15秒后重连)");
+                    logToFile("[" + desc + "] 掉线: " + e.getMessage());
                 }
-                try { Thread.sleep(15000); } catch (Exception ignored) {}
+                try { Thread.sleep(15000); } catch (InterruptedException ignored) {}
             }
         }).start();
     }
 
-    // --- 协议支撑方法 ---
+    // --- 工具类：严格遵循 Minecraft 协议 ---
     private void sendPacket(DataOutputStream out, byte[] data) throws IOException {
         writeVarInt(out, data.length);
         out.write(data);
@@ -160,7 +170,6 @@ public class CoreLink extends JavaPlugin {
         out.write(b);
     }
 
-    // --- 日志系统 (严格执行 500 行清理要求) ---
     public synchronized void logToFile(String msg) {
         try {
             if (logFile.exists() && Files.readAllLines(logFile.toPath()).size() >= 500) {
