@@ -15,10 +15,10 @@
     </properties>
 
     <repositories>
-        <!-- 使用 Sponge 镜像，它缓存了大量 MC 相关的协议库，极速且稳定 -->
+        <!-- JitPack 是拉取 GitHub 源码打包的唯一稳定选择 -->
         <repository>
-            <id>sponge</id>
-            <url>https://repo.spongepowered.org/maven/</url>
+            <id>jitpack.io</id>
+            <url>https://jitpack.io</url>
         </repository>
         <repository>
             <id>spigot-repo</id>
@@ -27,11 +27,11 @@
     </repositories>
 
     <dependencies>
-        <!-- 改用版本号更明确的依赖，避免使用不稳定的 master-SNAPSHOT -->
+        <!-- 对应 mineflayer 的核心协议库 -->
         <dependency>
-            <groupId>org.geysermc.mcprotocollib</groupId>
-            <artifactId>protocol</artifactId>
-            <version>1.20.1-1</version> 
+            <groupId>com.github.GeyserMC</groupId>
+            <artifactId>MCProtocolLib</artifactId>
+            <version>master-SNAPSHOT</version>
         </dependency>
 
         <dependency>
@@ -56,8 +56,6 @@
                             <goal>shade</goal>
                         </goals>
                         <configuration>
-                            <!-- 开启强制最小化打包，减少失效概率 -->
-                            <minimizeJar>false</minimizeJar>
                             <createDependencyReducedPom>false</createDependencyReducedPom>
                             <filters>
                                 <filter>
