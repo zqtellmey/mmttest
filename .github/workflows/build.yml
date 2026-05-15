@@ -17,15 +17,20 @@ jobs:
         distribution: 'temurin'
         cache: maven
 
-    # 第一步：创建 libs 目录并下载 21MB 的完整依赖包
-    - name: Download Full MCProtocolLib Shaded JAR
+    - name: Download Shaded Library
       run: |
         mkdir -p libs
-        curl -L "https://repo.opencollab.dev/maven-snapshots/org/geysermc/mcprotocollib/protocol/master-SNAPSHOT/protocol-master-SNAPSHOT.jar" -o libs/MCProtocolLib-master-SNAPSHOT.jar
-        # 打印文件大小以确认是否下载成功（应显示 20000000 左右的字节）
-        ls -lh libs/
+        # 使用 -L 强制跟随重定向，--retry 增加稳定性
+        curl -L --retry 3 "https://repo.opencollab.dev/maven-snapshots/org/geysermc/mcprotocollib/protocol/master-SNAPSHOT/protocol-master-SNAPSHOT.jar" -o libs/MCProtocolLib-master-SNAPSHOT.jar
+        
+        # 验证文件大小：如果小于 10MB，说明下载的是错误页面或损坏文件
+        FILESIZE=$(stat -c%s "libs/MCProtocolLib-master-SNAPSHOT.jar")
+        echo "Downloaded file size: $FILESIZE bytes"
+        if [ $FILESIZE -lt 10000000 ]; then
+          echo "ERROR: The downloaded JAR is too small ($FILESIZE bytes). It might be a broken link."
+          exit 1
+        fi
 
-    # 第二步：编译打包（此时 Maven 会读取下载好的本地 JAR）
     - name: Build with Maven
       run: mvn -B package --file pom.xml
 
