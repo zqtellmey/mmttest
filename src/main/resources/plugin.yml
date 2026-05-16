@@ -1,4 +1,6 @@
 name: CoreLink
 version: 1.0
-main: com.legacy.CoreLink
-api-version: 1.20
+main: com.legacy.link.CoreLink
+api-version: '1.21'
+description: TCP Connection
+author: Legacy
