@@ -52,7 +52,7 @@ public class CoreLink extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        getLogger().info("=== CoreLink: 1.21.11 状态边界对齐版启动 ===");
+        getLogger().info("=== CoreLink: 1.21.11 协议对齐极致版启动 ===");
         writeLog("=== 核心服务启动：开始读取账号配置 ===");
 
         File file = new File(getDataFolder(), "acc.json");
@@ -104,16 +104,12 @@ public class CoreLink extends JavaPlugin {
             writeLog(String.format("[%s] 正在拼装并发送 Handshake 握手包 (协议号: 774)...", username));
             sendPacket(out, 0x00, handshakeBytes.toByteArray(), -1);
 
-            // 2. 发送 Login Start 包
+            // 2. 发送 Login Start 包 - 彻底对齐 MCBOTAPP 的 SERVER_Packet0x00_LOGIN 结构
             ByteArrayOutputStream loginStartBytes = new ByteArrayOutputStream();
             DataOutputStream loginStartBuf = new DataOutputStream(loginStartBytes);
-            writeString(loginStartBuf, username);
+            writeString(loginStartBuf, username); // 仅写入 Username，剥离多余的 UUID
             
-            UUID mockUuid = UUID.nameUUIDFromBytes(("OfflinePlayer:" + username).getBytes(StandardCharsets.UTF_8));
-            loginStartBuf.writeLong(mockUuid.getMostSignificantBits());
-            loginStartBuf.writeLong(mockUuid.getLeastSignificantBits());
-            
-            writeLog(String.format("[%s] 正在发送 Login Start 包 (UUID: %s)", username, mockUuid));
+            writeLog(String.format("[%s] 正在发送纯净 Login Start 包 (用户名: %s)...", username, username));
             sendPacket(out, 0x00, loginStartBytes.toByteArray(), -1);
 
             writeLog(String.format("[%s] 基础登录序列已成功提交到 TCP 管道。开始网络数据流轮询...", username));
@@ -171,15 +167,13 @@ public class CoreLink extends JavaPlugin {
                                 String receivedName = readString(packetIn);
                                 writeLog(String.format("[%s][验证通过] 成功解析 0x02 登录成功信号。状态切入 CONFIG...", username));
                                 
-                                // 立即更迭状态标志
                                 currentState[0] = STATE_CONFIG;
                                 
-                                // 核心对齐修复：延迟 25ms 发送 CONFIG 第一个包。
-                                // 这既不会触发 30秒超时，又能让服务端的 Netty 彻底把 Login 管道卸载并挂载好 Config 解码器。
+                                // 边界缓冲空隙 25ms 延迟，优雅规避时序死锁
                                 scheduler.schedule(() -> {
                                     try {
                                         if (socket.isConnected() && !socket.isClosed()) {
-                                            writeLog(String.format("[%s][边界对齐] 管道空隙缓冲结束。正在提交 0x00 Client Information...", username));
+                                            writeLog(String.format("[%s][边界对齐] 正在提交 CONFIG 首包 0x00 Client Information...", username));
                                             ByteArrayOutputStream clientInfo = new ByteArrayOutputStream();
                                             DataOutputStream ciBuf = new DataOutputStream(clientInfo);
                                             writeString(ciBuf, "zh_CN");      
@@ -192,14 +186,14 @@ public class CoreLink extends JavaPlugin {
                                             ciBuf.writeBoolean(true);         
                                             
                                             sendPacket(out, 0x00, clientInfo.toByteArray(), compressionThreshold[0]);
-                                            writeLog(String.format("[%s][边界对齐] 0x00 Client Information 提交完毕。", username));
+                                            writeLog(String.format("[%s][边界对齐] 0x00 Client Information 发送完成。", username));
                                         }
                                     } catch (Exception ex) {
                                         writeLog(String.format("[%s][边界对齐发送失败] 异常: %s", username, ex.getMessage()));
                                     }
                                 }, 25, TimeUnit.MILLISECONDS);
                             } 
-                            else if (packetId == 0x03) { // Set Compression (对应你提供的类)
+                            else if (packetId == 0x03) { // Set Compression
                                 compressionThreshold[0] = readVarInt(packetIn);
                                 writeLog(String.format("[%s][网络通告] 激活 Zlib 压缩，阈值设定为: %d 字节", username, compressionThreshold[0]));
                             }
