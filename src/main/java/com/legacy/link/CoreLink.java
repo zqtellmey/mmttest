@@ -91,7 +91,7 @@ public class CoreLink extends JavaPlugin {
             DataInputStream in = new DataInputStream(socket.getInputStream());
 
             final int[] currentState = { STATE_LOGIN };
-            final int[] compressionThreshold = { -1 }; // -1 代表未启用压缩
+            final int[] compressionThreshold = { -1 };
 
             // 1. 发送 1.21.11 握手包
             ByteArrayOutputStream handshakeBytes = new ByteArrayOutputStream();
@@ -139,27 +139,23 @@ public class CoreLink extends JavaPlugin {
                         DataInputStream packetIn;
                         ByteArrayInputStream bais;
 
-                        // === 核心修复：引入压缩包的流式重解包逻辑 ===
                         if (compressionThreshold[0] >= 0) {
                             bais = new ByteArrayInputStream(packetBuffer);
                             DataInputStream compReader = new DataInputStream(bais);
                             int dataLength = readVarInt(compReader);
                             
                             if (dataLength == 0) {
-                                // dataLength 为 0，代表此包大小未达到阈值，后面紧跟纯未压缩数据
                                 int remaining = bais.available();
                                 byte[] uncompressedData = new byte[remaining];
                                 compReader.readFully(uncompressedData);
                                 packetIn = new DataInputStream(new ByteArrayInputStream(uncompressedData));
                             } else {
-                                // 需要进行 Zlib 解压
                                 byte[] compressedData = new byte[bais.available()];
                                 compReader.readFully(compressedData);
                                 byte[] uncompressedData = decompress(compressedData, dataLength);
                                 packetIn = new DataInputStream(new ByteArrayInputStream(uncompressedData));
                             }
                         } else {
-                            // 未启用压缩，采用标准流解析
                             bais = new ByteArrayInputStream(packetBuffer);
                             packetIn = new DataInputStream(bais);
                         }
@@ -180,8 +176,14 @@ public class CoreLink extends JavaPlugin {
                                 long leastSig = packetIn.readLong();
                                 String receivedName = readString(packetIn);
                                 writeLog(String.format("[%s][验证通过] 成功解析 0x02 登录成功信号！UUID: %s, 返回名称: %s", username, new UUID(mostSig, leastSig), receivedName));
-                                writeLog(String.format("[%s][状态转移] 正在将客户端底层转换为 CONFIGURATION (配置) 阶段...", username));
+                                
+                                // 核心修复点：转换状态，并主动向服务器通告配置确认，打破死等僵局
                                 currentState[0] = STATE_CONFIG;
+                                writeLog(String.format("[%s][状态转移] 客户端底层切换为 CONFIGURATION，立即下发客户端配置确认包(0x03)...", username));
+                                
+                                // 1.21.11 在配置阶段由客户端主动发送的客户端设置包（或者空配置应答包）
+                                ByteArrayOutputStream configAcknowledge = new ByteArrayOutputStream();
+                                sendPacket(out, 0x03, configAcknowledge.toByteArray(), compressionThreshold[0]);
                             } 
                             // 0x03: Set Compression
                             else if (packetId == 0x03) {
@@ -239,7 +241,7 @@ public class CoreLink extends JavaPlugin {
                         }
                     }
                 } catch (Exception e) {
-                    writeLog(String.format("[%s][网络流断开或崩溃] 错误详情: %s", username, e.getMessage()));
+                    writeLog(String.format("[%s][网络流断开或崩溃] 错误详情: %s", username, e.getMessage() == null ? "EOF (服务器主动关闭连接或超时)" : e.getMessage()));
                 }
             });
 
@@ -319,7 +321,6 @@ public class CoreLink extends JavaPlugin {
         out.write(bytes);
     }
 
-    // === 发送包支持动态压缩判断 ===
     private void sendPacket(DataOutputStream out, int packetId, byte[] data, int threshold) throws Exception {
         ByteArrayOutputStream packetBytes = new ByteArrayOutputStream();
         DataOutputStream packetBuf = new DataOutputStream(packetBytes);
@@ -331,19 +332,15 @@ public class CoreLink extends JavaPlugin {
         DataOutputStream finalBuf = new DataOutputStream(finalBytes);
 
         if (threshold >= 0) {
-            // 已启用压缩状态
             if (rawPacket.length >= threshold) {
-                // 大于阈值，进行压缩
                 byte[] compressed = compress(rawPacket);
-                writeVarInt(finalBuf, rawPacket.length); // 写入解压后长度
+                writeVarInt(finalBuf, rawPacket.length);
                 finalBuf.write(compressed);
             } else {
-                // 小于阈值，未压缩，dataLength 写入 0
                 writeVarInt(finalBuf, 0);
                 finalBuf.write(rawPacket);
             }
         } else {
-            // 未压缩状态
             finalBuf.write(rawPacket);
         }
 
@@ -353,7 +350,6 @@ public class CoreLink extends JavaPlugin {
         out.flush();
     }
 
-    // === Zlib 压缩与解压辅助实现 ===
     private static byte[] decompress(byte[] data, int uncompressedLength) throws Exception {
         Inflater inflater = new Inflater();
         inflater.setInput(data);
