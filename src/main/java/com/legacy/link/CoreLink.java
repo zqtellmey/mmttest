@@ -93,7 +93,7 @@ public class CoreLink extends JavaPlugin {
             final int[] currentState = { STATE_LOGIN };
             final int[] compressionThreshold = { -1 };
 
-            // 1. 发送 1.21.11 握手包 (协议号: 774)
+            // 1. 发送 1.21.11 Handshake (协议号 774)
             ByteArrayOutputStream handshakeBytes = new ByteArrayOutputStream();
             DataOutputStream handshakeBuf = new DataOutputStream(handshakeBytes);
             writeVarInt(handshakeBuf, 774); 
@@ -176,9 +176,24 @@ public class CoreLink extends JavaPlugin {
                                 String receivedName = readString(packetIn);
                                 writeLog(String.format("[%s][验证通过] 成功解析 0x02 登录成功信号！UUID: %s, 返回名称: %s", username, new UUID(mostSig, leastSig), receivedName));
                                 
-                                // 顺利切换状态，保持安静，等待服务器发送 CONFIG 第一条指令
+                                // 核心修改：正式切入配置阶段，并必须由客户端打破沉默，主动下发 Client Information
                                 currentState[0] = STATE_CONFIG;
-                                writeLog(String.format("[%s][状态转移] 客户端底层正式步入 CONFIGURATION 配置阶段。", username));
+                                writeLog(String.format("[%s][状态转移] 正式步入 CONFIG 阶段，主动下发 0x00 Client Information 激活包...", username));
+                                
+                                // 精准构建 1.21.11 Serverbound Client Information (0x00)
+                                ByteArrayOutputStream clientInfo = new ByteArrayOutputStream();
+                                DataOutputStream ciBuf = new DataOutputStream(clientInfo);
+                                writeString(ciBuf, "zh_CN");      // Locale
+                                ciBuf.writeByte(10);              // View Distance
+                                writeVarInt(ciBuf, 0);            // Chat Mode (0: Enabled)
+                                ciBuf.writeBoolean(true);         // Chat Colors
+                                ciBuf.writeByte(127);             // Skin Parts (全部启用)
+                                writeVarInt(ciBuf, 1);            // Main Hand (1: Right)
+                                ciBuf.writeBoolean(false);        // Text Filtering
+                                ciBuf.writeBoolean(true);         // Allow Server Listings
+                                
+                                sendPacket(out, 0x00, clientInfo.toByteArray(), compressionThreshold[0]);
+                                writeLog(String.format("[%s][CONFIG] 成功发送激活令牌包 (Client Information 0x00)，等待服务器下发管道指令...", username));
                             } 
                             else if (packetId == 0x03) { // Set Compression
                                 compressionThreshold[0] = readVarInt(packetIn);
@@ -216,7 +231,7 @@ public class CoreLink extends JavaPlugin {
                                 // 精准构建 1.21.11 Serverbound Select Known Packs Response (0x07)
                                 ByteArrayOutputStream kp = new ByteArrayOutputStream();
                                 DataOutputStream kpBuf = new DataOutputStream(kp);
-                                writeVarInt(kpBuf, 0); // 已知资源包数量: 0
+                                writeVarInt(kpBuf, 0); // 声明 0 个已知自定义包
                                 
                                 sendPacket(out, 0x07, kp.toByteArray(), compressionThreshold[0]);
                                 writeLog(String.format("[%s][CONFIG] 已成功回传 Select Known Packs 响应包 (0x07)", username));
@@ -239,19 +254,16 @@ public class CoreLink extends JavaPlugin {
                                 sendPacket(out, 0x02, brandResp.toByteArray(), compressionThreshold[0]); 
                             }
                             else {
-                                // 遇到非关键配置信息（如 Registry Data 0x03 等），保持静默，让流继续往下走
                                 writeLog(String.format("[%s][CONFIG] 略过非阻塞型配置包 0x%s", username, Integer.toHexString(packetId).toUpperCase()));
                             }
                         } 
                         // ==================== STATE_PLAY 状态分支 ====================
                         else if (currentState[0] == STATE_PLAY) {
-                            // 1.21.11 Play 阶段的心跳 Packet ID (通常为 0x36 或 0x32，这里采用多重兼容阻断)
                             if (packetId == 0x36 || packetId == 0x32 || packetId == 0x03) {
                                 long id = packetIn.readLong();
                                 ByteArrayOutputStream kaBytes = new ByteArrayOutputStream();
                                 DataOutputStream kaBuf = new DataOutputStream(kaBytes);
                                 kaBuf.writeLong(id);
-                                // 1.21.11 Play 阶段的心跳回应包 ID 为 0x18
                                 sendPacket(out, 0x18, kaBytes.toByteArray(), compressionThreshold[0]);
                                 writeLog(String.format("[%s][心跳生命线] 成功回应服务器全球 Ping 心跳，ID: %d", username, id));
                             }
@@ -267,7 +279,6 @@ public class CoreLink extends JavaPlugin {
                 try {
                     if (socket.isConnected() && !socket.isClosed()) {
                         if (currentState[0] == STATE_PLAY) {
-                            // 1.21.11 标准挂机位置微调包（防止被 AFK 插件踢出）
                             ByteArrayOutputStream moveBytes = new ByteArrayOutputStream();
                             DataOutputStream moveBuf = new DataOutputStream(moveBytes);
                             moveBuf.writeDouble((random.nextDouble() - 0.5) * 0.01);
@@ -277,7 +288,6 @@ public class CoreLink extends JavaPlugin {
                             moveBuf.writeFloat(0.0f);
                             moveBuf.writeBoolean(true);  
                             moveBuf.writeBoolean(false); 
-                            // 1.21.11 玩家位置与旋转包 ID 为 0x1E
                             sendPacket(out, 0x1E, moveBytes.toByteArray(), compressionThreshold[0]);
                         }
                     } else {
