@@ -85,6 +85,7 @@ public class CoreLink extends JavaPlugin {
         try {
             writeLog(String.format("[%s] 正在发起标准 TCP 套接字连接 -> %s:%d", username, host, port));
             Socket socket = new Socket(host, port);
+            socket.setTcpNoDelay(true); // 禁用 Nagle 算法，让发包立刻冲出去，绝不积压黏包
             activeSockets.put(username, socket);
 
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
@@ -93,28 +94,35 @@ public class CoreLink extends JavaPlugin {
             final int[] currentState = { STATE_LOGIN };
             final int[] compressionThreshold = { -1 };
 
-            // 1. 发送 Handshake (协议号 774)
+            // ==========================================
+            // 【核心重构】建立独立、干净的临时缓冲区，绝不复用
+            // ==========================================
+            
+            // 1. 独立拼装 Handshake 包 (0x00)
             ByteArrayOutputStream handshakeBytes = new ByteArrayOutputStream();
             DataOutputStream handshakeBuf = new DataOutputStream(handshakeBytes);
-            writeVarInt(handshakeBuf, 774); 
+            writeVarInt(handshakeBuf, 774); // 1.21 / 1.21.1 协议号
             writeString(handshakeBuf, host);
             handshakeBuf.writeShort(port);
             writeVarInt(handshakeBuf, STATE_LOGIN); 
             
-            writeLog(String.format("[%s] 正在拼装并发送 Handshake 握手包 (协议号: 774)...", username));
-            sendPacket(out, 0x00, handshakeBytes.toByteArray(), -1);
-
-            // 2. 发送 Login Start 包 - 彻底对齐 MCBOTAPP 的 SERVER_Packet0x00_LOGIN 结构
+            // 2. 独立拼装 Login Start 包 (0x00) - 严格参照你提供的 MCBOTAPP 结构
             ByteArrayOutputStream loginStartBytes = new ByteArrayOutputStream();
             DataOutputStream loginStartBuf = new DataOutputStream(loginStartBytes);
-            writeString(loginStartBuf, username); // 仅写入 Username，剥离多余的 UUID
-            
+            writeString(loginStartBuf, username); // 仅写入 Username
+
+            // 3. 顺序发送，并强制刷出数据流边界
+            writeLog(String.format("[%s] 正在发送 Handshake 握手包...", username));
+            sendPacket(out, 0x00, handshakeBytes.toByteArray(), -1);
+            out.flush(); // 强制 TCP 管道刷新
+
             writeLog(String.format("[%s] 正在发送纯净 Login Start 包 (用户名: %s)...", username, username));
             sendPacket(out, 0x00, loginStartBytes.toByteArray(), -1);
+            out.flush(); // 再次强制刷新，确保两条数据在 Netty 侧被切分成两个物理帧
 
             writeLog(String.format("[%s] 基础登录序列已成功提交到 TCP 管道。开始网络数据流轮询...", username));
 
-            // 3. 异步流解析轮询
+            // 4. 异步流解析轮询
             scheduler.execute(() -> {
                 try {
                     while (socket.isConnected() && !socket.isClosed()) {
@@ -186,6 +194,7 @@ public class CoreLink extends JavaPlugin {
                                             ciBuf.writeBoolean(true);         
                                             
                                             sendPacket(out, 0x00, clientInfo.toByteArray(), compressionThreshold[0]);
+                                            out.flush();
                                             writeLog(String.format("[%s][边界对齐] 0x00 Client Information 发送完成。", username));
                                         }
                                     } catch (Exception ex) {
@@ -205,6 +214,7 @@ public class CoreLink extends JavaPlugin {
                                 writeVarInt(respBuf, messageId);
                                 respBuf.writeBoolean(false); 
                                 sendPacket(out, 0x02, resp.toByteArray(), compressionThreshold[0]);
+                                out.flush();
                             }
                         } 
                         // ==================== STATE_CONFIG 状态分支 ====================
@@ -219,6 +229,7 @@ public class CoreLink extends JavaPlugin {
                                 cookieRespBuf.writeBoolean(false); 
                                 
                                 sendPacket(out, 0x00, cookieResp.toByteArray(), compressionThreshold[0]);
+                                out.flush();
                             }
                             else if (packetId == 0x0E) { // Select Known Packs Request
                                 writeLog(String.format("[%s][CONFIG] 响应资源包质询 (0x0E)", username));
@@ -226,10 +237,12 @@ public class CoreLink extends JavaPlugin {
                                 DataOutputStream kpBuf = new DataOutputStream(kp);
                                 writeVarInt(kpBuf, 0); 
                                 sendPacket(out, 0x07, kp.toByteArray(), compressionThreshold[0]);
+                                out.flush();
                             }
                             else if (packetId == 0x02) { // Finish Configuration
                                 writeLog(String.format("[%s][CONFIG] 接收到 Finish Configuration 0x02！", username));
                                 sendPacket(out, 0x03, new byte[0], compressionThreshold[0]);
+                                out.flush();
                                 
                                 currentState[0] = STATE_PLAY;
                                 writeLog(String.format("[%s] === [大成功] 挂机机器人已完美滑入 PLAY 阶段！ ===", username));
@@ -239,6 +252,7 @@ public class CoreLink extends JavaPlugin {
                                 ByteArrayOutputStream brandResp = new ByteArrayOutputStream();
                                 writeString(new DataOutputStream(brandResp), "vanilla");
                                 sendPacket(out, 0x02, brandResp.toByteArray(), compressionThreshold[0]); 
+                                out.flush();
                             }
                         } 
                         // ==================== STATE_PLAY 状态分支 ====================
@@ -249,6 +263,7 @@ public class CoreLink extends JavaPlugin {
                                 DataOutputStream kaBuf = new DataOutputStream(kaBytes);
                                 kaBuf.writeLong(id);
                                 sendPacket(out, 0x18, kaBytes.toByteArray(), compressionThreshold[0]);
+                                out.flush();
                                 writeLog(String.format("[%s][心跳] 维持服务器在线 Ping, ID: %d", username, id));
                             }
                         }
@@ -258,7 +273,7 @@ public class CoreLink extends JavaPlugin {
                 }
             });
 
-            // 4. 定时生存守护
+            // 5. 定时生存守护
             scheduler.scheduleWithFixedDelay(() -> {
                 try {
                     if (socket.isConnected() && !socket.isClosed()) {
@@ -273,6 +288,7 @@ public class CoreLink extends JavaPlugin {
                             moveBuf.writeBoolean(true);  
                             moveBuf.writeBoolean(false); 
                             sendPacket(out, 0x1E, moveBytes.toByteArray(), compressionThreshold[0]);
+                            out.flush();
                         }
                     } else {
                         throw new Exception("Socket closed");
@@ -360,7 +376,6 @@ public class CoreLink extends JavaPlugin {
         byte[] frame = finalBytes.toByteArray();
         writeVarInt(out, frame.length);
         out.write(frame);
-        out.flush();
     }
 
     private static byte[] decompress(byte[] data, int uncompressedLength) throws Exception {
