@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -19,6 +20,7 @@ import java.util.*;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.Inflater;
 
 public class CoreLink extends JavaPlugin {
 
@@ -89,8 +91,9 @@ public class CoreLink extends JavaPlugin {
             DataInputStream in = new DataInputStream(socket.getInputStream());
 
             final int[] currentState = { STATE_LOGIN };
+            final int[] compressionThreshold = { -1 }; // -1 代表未启用压缩
 
-            // 1. 发送 1.21.11 握手包 (协议号 774)
+            // 1. 发送 1.21.11 握手包
             ByteArrayOutputStream handshakeBytes = new ByteArrayOutputStream();
             DataOutputStream handshakeBuf = new DataOutputStream(handshakeBytes);
             writeVarInt(handshakeBuf, 774); 
@@ -99,25 +102,23 @@ public class CoreLink extends JavaPlugin {
             writeVarInt(handshakeBuf, STATE_LOGIN); 
             
             writeLog(String.format("[%s] 正在拼装并发送 Handshake 握手包 (协议号: 774)...", username));
-            sendPacket(out, 0x00, handshakeBytes.toByteArray());
+            sendPacket(out, 0x00, handshakeBytes.toByteArray(), -1);
 
-            // 2. 发送精准 1.21.11 Login Start 包 (ServerboundHelloPacket)
+            // 2. 发送 Login Start 包
             ByteArrayOutputStream loginStartBytes = new ByteArrayOutputStream();
             DataOutputStream loginStartBuf = new DataOutputStream(loginStartBytes);
-            
-            // 修复核心：1.21.11 规范离线登录，包体内只需先塞名字，紧接着 16 字节 UUID 即可。不能写多余的 Boolean 标志！
             writeString(loginStartBuf, username);
             
             UUID mockUuid = UUID.nameUUIDFromBytes(("OfflinePlayer:" + username).getBytes(StandardCharsets.UTF_8));
             loginStartBuf.writeLong(mockUuid.getMostSignificantBits());
             loginStartBuf.writeLong(mockUuid.getLeastSignificantBits());
             
-            writeLog(String.format("[%s] 正在发送修复后的 Login Start 包 (UUID: %s)", username, mockUuid));
-            sendPacket(out, 0x00, loginStartBytes.toByteArray());
+            writeLog(String.format("[%s] 正在发送 Login Start 包 (UUID: %s)", username, mockUuid));
+            sendPacket(out, 0x00, loginStartBytes.toByteArray(), -1);
 
-            writeLog(String.format("[%s] 基础登录序列已成功提交到 TCP 管道。网络监听就绪，开始阻塞等待服务器响应...", username));
+            writeLog(String.format("[%s] 基础登录序列已成功提交到 TCP 管道。开始网络数据流轮询...", username));
 
-            // 3. 异步高信息度流解析轮询
+            // 3. 异步流解析轮询
             scheduler.execute(() -> {
                 try {
                     while (socket.isConnected() && !socket.isClosed()) {
@@ -135,14 +136,39 @@ public class CoreLink extends JavaPlugin {
                         
                         writeLog(String.format("[%s][原始 Hex 监控] 传入字节流: %s", username, bytesToHex(packetBuffer)));
 
-                        java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(packetBuffer);
-                        DataInputStream packetIn = new DataInputStream(bais);
+                        DataInputStream packetIn;
+                        ByteArrayInputStream bais;
+
+                        // === 核心修复：引入压缩包的流式重解包逻辑 ===
+                        if (compressionThreshold[0] >= 0) {
+                            bais = new ByteArrayInputStream(packetBuffer);
+                            DataInputStream compReader = new DataInputStream(bais);
+                            int dataLength = readVarInt(compReader);
+                            
+                            if (dataLength == 0) {
+                                // dataLength 为 0，代表此包大小未达到阈值，后面紧跟纯未压缩数据
+                                int remaining = bais.available();
+                                byte[] uncompressedData = new byte[remaining];
+                                compReader.readFully(uncompressedData);
+                                packetIn = new DataInputStream(new ByteArrayInputStream(uncompressedData));
+                            } else {
+                                // 需要进行 Zlib 解压
+                                byte[] compressedData = new byte[bais.available()];
+                                compReader.readFully(compressedData);
+                                byte[] uncompressedData = decompress(compressedData, dataLength);
+                                packetIn = new DataInputStream(new ByteArrayInputStream(uncompressedData));
+                            }
+                        } else {
+                            // 未启用压缩，采用标准流解析
+                            bais = new ByteArrayInputStream(packetBuffer);
+                            packetIn = new DataInputStream(bais);
+                        }
                         
                         int packetId = readVarInt(packetIn);
                         writeLog(String.format("[%s][协议解析] 当前状态 [%d] -> 成功分离出 Packet ID: 0x%s", username, currentState[0], Integer.toHexString(packetId).toUpperCase()));
 
                         if (currentState[0] == STATE_LOGIN) {
-                            // 0x00: Disconnect (被踢出)
+                            // 0x00: Disconnect
                             if (packetId == 0x00) {
                                 String reason = readString(packetIn);
                                 writeLog(String.format("[%s][拒绝登录] 服务器亮起断开红灯，原因文本: %s", username, reason));
@@ -159,8 +185,8 @@ public class CoreLink extends JavaPlugin {
                             } 
                             // 0x03: Set Compression
                             else if (packetId == 0x03) {
-                                int threshold = readVarInt(packetIn);
-                                writeLog(String.format("[%s][网络通告] 服务器要求激活网路 Zlib 压缩，阈值设定为: %d 字节", username, threshold));
+                                compressionThreshold[0] = readVarInt(packetIn);
+                                writeLog(String.format("[%s][网络通告] 服务器要求激活网路 Zlib 压缩，阈值设定为: %d 字节", username, compressionThreshold[0]));
                             }
                             // 0x04: Login Plugin Request
                             else if (packetId == 0x04) {
@@ -171,14 +197,14 @@ public class CoreLink extends JavaPlugin {
                                 DataOutputStream respBuf = new DataOutputStream(resp);
                                 writeVarInt(respBuf, messageId);
                                 respBuf.writeBoolean(false); 
-                                sendPacket(out, 0x02, resp.toByteArray());
+                                sendPacket(out, 0x02, resp.toByteArray(), compressionThreshold[0]);
                             }
                         } 
                         else if (currentState[0] == STATE_CONFIG) {
                             // 0x00: Cookie Request
                             if (packetId == 0x00) {
                                 writeLog(String.format("[%s][CONFIG] 回复服务器端基础网络 Cookie 校验...", username));
-                                sendPacket(out, 0x00, new byte[0]);
+                                sendPacket(out, 0x00, new byte[0], compressionThreshold[0]);
                             }
                             // 0x01: Clientbound Known Packs
                             else if (packetId == 0x01) {
@@ -186,19 +212,19 @@ public class CoreLink extends JavaPlugin {
                                 ByteArrayOutputStream kp = new ByteArrayOutputStream();
                                 DataOutputStream kpBuf = new DataOutputStream(kp);
                                 writeVarInt(kpBuf, 0); 
-                                sendPacket(out, 0x01, kp.toByteArray());
+                                sendPacket(out, 0x01, kp.toByteArray(), compressionThreshold[0]);
                             }
                             // 0x02: Finish Configuration
                             else if (packetId == 0x02) {
                                 writeLog(String.format("[%s][CONFIG] 拿到完成配置通告（Finish Configuration）！回传最终确认包...", username));
-                                sendPacket(out, 0x03, new byte[0]);
+                                sendPacket(out, 0x03, new byte[0], compressionThreshold[0]);
                                 currentState[0] = STATE_PLAY;
                                 writeLog(String.format("[%s] === [大成功] 机器人已完美进入 PLAY 游戏状态！ ===", username));
                             }
                             // 0x03: Registry Data
                             else if (packetId == 0x03) {
                                 writeLog(String.format("[%s][CONFIG] 接收核心元素注册表数据，发送回显确认...", username));
-                                sendPacket(out, 0x02, new byte[]{0}); 
+                                sendPacket(out, 0x02, new byte[]{0}, compressionThreshold[0]); 
                             }
                         } 
                         else if (currentState[0] == STATE_PLAY) {
@@ -207,7 +233,7 @@ public class CoreLink extends JavaPlugin {
                                 ByteArrayOutputStream kaBytes = new ByteArrayOutputStream();
                                 DataOutputStream kaBuf = new DataOutputStream(kaBytes);
                                 kaBuf.writeLong(id);
-                                sendPacket(out, 0x15, kaBytes.toByteArray());
+                                sendPacket(out, 0x15, kaBytes.toByteArray(), compressionThreshold[0]);
                                 writeLog(String.format("[%s][心跳生命线] 成功回应服务器 Ping 心跳，ID: %d", username, id));
                             }
                         }
@@ -231,7 +257,7 @@ public class CoreLink extends JavaPlugin {
                             moveBuf.writeFloat(0.0f);
                             moveBuf.writeBoolean(true);  
                             moveBuf.writeBoolean(false); 
-                            sendPacket(out, 0x1C, moveBytes.toByteArray());
+                            sendPacket(out, 0x1C, moveBytes.toByteArray(), compressionThreshold[0]);
                         }
                     } else {
                         throw new Exception("套接字已被服务器底层强行掐断。");
@@ -293,16 +319,65 @@ public class CoreLink extends JavaPlugin {
         out.write(bytes);
     }
 
-    private void sendPacket(DataOutputStream out, int packetId, byte[] data) throws Exception {
+    // === 发送包支持动态压缩判断 ===
+    private void sendPacket(DataOutputStream out, int packetId, byte[] data, int threshold) throws Exception {
         ByteArrayOutputStream packetBytes = new ByteArrayOutputStream();
         DataOutputStream packetBuf = new DataOutputStream(packetBytes);
         writeVarInt(packetBuf, packetId);
         packetBuf.write(data);
-
         byte[] rawPacket = packetBytes.toByteArray();
-        writeVarInt(out, rawPacket.length);
-        out.write(rawPacket);
+
+        ByteArrayOutputStream finalBytes = new ByteArrayOutputStream();
+        DataOutputStream finalBuf = new DataOutputStream(finalBytes);
+
+        if (threshold >= 0) {
+            // 已启用压缩状态
+            if (rawPacket.length >= threshold) {
+                // 大于阈值，进行压缩
+                byte[] compressed = compress(rawPacket);
+                writeVarInt(finalBuf, rawPacket.length); // 写入解压后长度
+                finalBuf.write(compressed);
+            } else {
+                // 小于阈值，未压缩，dataLength 写入 0
+                writeVarInt(finalBuf, 0);
+                finalBuf.write(rawPacket);
+            }
+        } else {
+            // 未压缩状态
+            finalBuf.write(rawPacket);
+        }
+
+        byte[][] frame = { finalBytes.toByteArray() };
+        writeVarInt(out, frame[0].length);
+        out.write(frame[0]);
         out.flush();
+    }
+
+    // === Zlib 压缩与解压辅助实现 ===
+    private static byte[] decompress(byte[] data, int uncompressedLength) throws Exception {
+        Inflater inflater = new Inflater();
+        inflater.setInput(data);
+        byte[] output = new byte[uncompressedLength];
+        int resultLength = inflater.inflate(output);
+        inflater.end();
+        if (resultLength != uncompressedLength) {
+            throw new IOException("Zlib 解压长度不符预期");
+        }
+        return output;
+    }
+
+    private static byte[] compress(byte[] data) throws Exception {
+        java.util.zip.Deflater deflater = new java.util.zip.Deflater();
+        deflater.setInput(data);
+        deflater.finish();
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(data.length);
+        byte[] buffer = new byte[1024];
+        while (!deflater.finished()) {
+            int count = deflater.deflate(buffer);
+            bos.write(buffer, 0, count);
+        }
+        deflater.end();
+        return bos.toByteArray();
     }
 
     private static String bytesToHex(byte[] bytes) {
