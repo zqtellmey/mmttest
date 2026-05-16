@@ -52,7 +52,7 @@ public class CoreLink extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        getLogger().info("=== CoreLink: 1.21.11 状态机严谨同步版启动 ===");
+        getLogger().info("=== CoreLink: 1.21.11 状态边界对齐版启动 ===");
         writeLog("=== 核心服务启动：开始读取账号配置 ===");
 
         File file = new File(getDataFolder(), "acc.json");
@@ -92,8 +92,6 @@ public class CoreLink extends JavaPlugin {
 
             final int[] currentState = { STATE_LOGIN };
             final int[] compressionThreshold = { -1 };
-            // 用一个布尔值标记，是否已经向服务器上报过客户端基础信息
-            final boolean[] clientInfoSubmitted = { false };
 
             // 1. 发送 Handshake (协议号 774)
             ByteArrayOutputStream handshakeBytes = new ByteArrayOutputStream();
@@ -124,20 +122,15 @@ public class CoreLink extends JavaPlugin {
             scheduler.execute(() -> {
                 try {
                     while (socket.isConnected() && !socket.isClosed()) {
-                        writeLog(String.format("[%s][网络队列] 正在尝试读取下一个数据包的 VarInt 长度头...", username));
                         int length = readVarInt(in);
-                        writeLog(String.format("[%s][网络队列] 成功截获数据包！声明的总长度(Length)为: %d 字节", username, length));
                         
                         if (length <= 0) {
-                            writeLog(String.format("[%s][警告] 收到非法或零长度的空包包头，断开当前监听循环。", username));
                             break;
                         }
 
                         byte[] packetBuffer = new byte[length];
                         in.readFully(packetBuffer);
                         
-                        writeLog(String.format("[%s][原始 Hex 监控] 传入字节流: %s", username, bytesToHex(packetBuffer)));
-
                         DataInputStream packetIn;
                         ByteArrayInputStream bais;
 
@@ -163,33 +156,56 @@ public class CoreLink extends JavaPlugin {
                         }
                         
                         int packetId = readVarInt(packetIn);
-                        writeLog(String.format("[%s][协议解析] 当前状态 [%d] -> 成功分离出 Packet ID: 0x%s", username, currentState[0], Integer.toHexString(packetId).toUpperCase()));
+                        writeLog(String.format("[%s][协议解析] 当前状态 [%d] -> 收到 Packet ID: 0x%s", username, currentState[0], Integer.toHexString(packetId).toUpperCase()));
 
                         // ==================== STATE_LOGIN 状态分支 ====================
                         if (currentState[0] == STATE_LOGIN) {
-                            if (packetId == 0x00) { // Disconnect
+                            if (packetId == 0x00) { 
                                 String reason = readString(packetIn);
-                                writeLog(String.format("[%s][拒绝登录] 服务器亮起断开红灯，原因文本: %s", username, reason));
+                                writeLog(String.format("[%s][拒绝登录] 服务器拒绝连接，原因: %s", username, reason));
                                 break;
                             }
                             else if (packetId == 0x02) { // Login Success
                                 long mostSig = packetIn.readLong();
                                 long leastSig = packetIn.readLong();
                                 String receivedName = readString(packetIn);
-                                writeLog(String.format("[%s][验证通过] 成功解析 0x02 登录成功信号！UUID: %s, 返回名称: %s", username, new UUID(mostSig, leastSig), receivedName));
+                                writeLog(String.format("[%s][验证通过] 成功解析 0x02 登录成功信号。状态切入 CONFIG...", username));
                                 
-                                // 核心变更：只切状态，绝对不主动“抢跑”发包，等待服务器在 CONFIG 阶段下发第一包
+                                // 立即更迭状态标志
                                 currentState[0] = STATE_CONFIG;
-                                writeLog(String.format("[%s][状态转移] 切入 CONFIG 阶段。进入静默期，等待服务端下发首个配置引导包...", username));
+                                
+                                // 核心对齐修复：延迟 25ms 发送 CONFIG 第一个包。
+                                // 这既不会触发 30秒超时，又能让服务端的 Netty 彻底把 Login 管道卸载并挂载好 Config 解码器。
+                                scheduler.schedule(() -> {
+                                    try {
+                                        if (socket.isConnected() && !socket.isClosed()) {
+                                            writeLog(String.format("[%s][边界对齐] 管道空隙缓冲结束。正在提交 0x00 Client Information...", username));
+                                            ByteArrayOutputStream clientInfo = new ByteArrayOutputStream();
+                                            DataOutputStream ciBuf = new DataOutputStream(clientInfo);
+                                            writeString(ciBuf, "zh_CN");      
+                                            ciBuf.writeByte(10);              
+                                            writeVarInt(ciBuf, 0);            
+                                            ciBuf.writeBoolean(true);         
+                                            ciBuf.writeByte(127);             
+                                            writeVarInt(ciBuf, 1);            
+                                            ciBuf.writeBoolean(false);        
+                                            ciBuf.writeBoolean(true);         
+                                            
+                                            sendPacket(out, 0x00, clientInfo.toByteArray(), compressionThreshold[0]);
+                                            writeLog(String.format("[%s][边界对齐] 0x00 Client Information 提交完毕。", username));
+                                        }
+                                    } catch (Exception ex) {
+                                        writeLog(String.format("[%s][边界对齐发送失败] 异常: %s", username, ex.getMessage()));
+                                    }
+                                }, 25, TimeUnit.MILLISECONDS);
                             } 
-                            else if (packetId == 0x03) { // Set Compression
+                            else if (packetId == 0x03) { // Set Compression (对应你提供的类)
                                 compressionThreshold[0] = readVarInt(packetIn);
-                                writeLog(String.format("[%s][网络通告] 服务器要求激活网路 Zlib 压缩，阈值设定为: %d 字节", username, compressionThreshold[0]));
+                                writeLog(String.format("[%s][网络通告] 激活 Zlib 压缩，阈值设定为: %d 字节", username, compressionThreshold[0]));
                             }
                             else if (packetId == 0x04) { // Login Plugin Request
                                 int messageId = readVarInt(packetIn);
                                 String channel = readString(packetIn);
-                                writeLog(String.format("[%s][自定义握手] 拦截到第 3 方安全插件通道请求: %s (ID: %d)，自动下发空应答...", username, channel, messageId));
                                 ByteArrayOutputStream resp = new ByteArrayOutputStream();
                                 DataOutputStream respBuf = new DataOutputStream(resp);
                                 writeVarInt(respBuf, messageId);
@@ -199,29 +215,9 @@ public class CoreLink extends JavaPlugin {
                         } 
                         // ==================== STATE_CONFIG 状态分支 ====================
                         else if (currentState[0] == STATE_CONFIG) {
-                            
-                            // 核心防御：只要收到了服务器在 CONFIG 阶段下发的任何包，且我们还没初始化过 Client Info，就顺水推舟补发
-                            if (!clientInfoSubmitted[0]) {
-                                writeLog(String.format("[%s][CONFIG流控] 捕捉到服务端配置包下发信号，管道已就绪！开始依序补全 0x00 Client Information...", username));
-                                ByteArrayOutputStream clientInfo = new ByteArrayOutputStream();
-                                DataOutputStream ciBuf = new DataOutputStream(clientInfo);
-                                writeString(ciBuf, "zh_CN");      
-                                ciBuf.writeByte(10);              
-                                writeVarInt(ciBuf, 0);            
-                                ciBuf.writeBoolean(true);         
-                                ciBuf.writeByte(127);             
-                                writeVarInt(ciBuf, 1);            
-                                ciBuf.writeBoolean(false);        
-                                ciBuf.writeBoolean(true);         
-                                
-                                sendPacket(out, 0x00, clientInfo.toByteArray(), compressionThreshold[0]);
-                                clientInfoSubmitted[0] = true;
-                                writeLog(String.format("[%s][CONFIG流控] 补发 Client Information 完成。", username));
-                            }
-
                             if (packetId == 0x01) { // Cookie Request 
                                 String cookieKey = readString(packetIn);
-                                writeLog(String.format("[%s][CONFIG] 收到服务器 Cookie 校验请求 Key: '%s'，正在拼装标准回显响应...", username, cookieKey));
+                                writeLog(String.format("[%s][CONFIG] 响应 Cookie 校验 Key: '%s'", username, cookieKey));
                                 
                                 ByteArrayOutputStream cookieResp = new ByteArrayOutputStream();
                                 DataOutputStream cookieRespBuf = new DataOutputStream(cookieResp);
@@ -229,36 +225,26 @@ public class CoreLink extends JavaPlugin {
                                 cookieRespBuf.writeBoolean(false); 
                                 
                                 sendPacket(out, 0x00, cookieResp.toByteArray(), compressionThreshold[0]);
-                                writeLog(String.format("[%s][CONFIG] 已成功回传 Cookie Response 包 (0x00)", username));
                             }
                             else if (packetId == 0x0E) { // Select Known Packs Request
-                                writeLog(String.format("[%s][CONFIG] 收到服务器资源包清单质询 (0x0E)，正在回传零依赖声明...", username));
-                                
+                                writeLog(String.format("[%s][CONFIG] 响应资源包质询 (0x0E)", username));
                                 ByteArrayOutputStream kp = new ByteArrayOutputStream();
                                 DataOutputStream kpBuf = new DataOutputStream(kp);
                                 writeVarInt(kpBuf, 0); 
-                                
                                 sendPacket(out, 0x07, kp.toByteArray(), compressionThreshold[0]);
-                                writeLog(String.format("[%s][CONFIG] 已成功回传 Select Known Packs 响应包 (0x07)", username));
                             }
                             else if (packetId == 0x02) { // Finish Configuration
-                                writeLog(String.format("[%s][CONFIG] 接收到配置终结令牌 (Finish Configuration 0x02)！", username));
-                                
+                                writeLog(String.format("[%s][CONFIG] 接收到 Finish Configuration 0x02！", username));
                                 sendPacket(out, 0x03, new byte[0], compressionThreshold[0]);
-                                writeLog(String.format("[%s][CONFIG] 已成功回传最终配置确认令牌 (0x03)", username));
                                 
                                 currentState[0] = STATE_PLAY;
-                                writeLog(String.format("[%s] === [大成功] 机器人已彻底、无损地进驻 PLAY 游戏视界！ ===", username));
+                                writeLog(String.format("[%s] === [大成功] 挂机机器人已完美滑入 PLAY 阶段！ ===", username));
                             }
-                            else if (packetId == 0x07) { // Custom Payload (例如 minecraft:brand)
+                            else if (packetId == 0x07) { // Custom Payload
                                 String brandChannel = readString(packetIn);
-                                writeLog(String.format("[%s][CONFIG] 收到服务器核心标签质询: %s，自动回传基础底模响应...", username, brandChannel));
                                 ByteArrayOutputStream brandResp = new ByteArrayOutputStream();
                                 writeString(new DataOutputStream(brandResp), "vanilla");
                                 sendPacket(out, 0x02, brandResp.toByteArray(), compressionThreshold[0]); 
-                            }
-                            else {
-                                writeLog(String.format("[%s][CONFIG] 略过或自动兼容非阻塞型配置包 0x%s", username, Integer.toHexString(packetId).toUpperCase()));
                             }
                         } 
                         // ==================== STATE_PLAY 状态分支 ====================
@@ -269,12 +255,12 @@ public class CoreLink extends JavaPlugin {
                                 DataOutputStream kaBuf = new DataOutputStream(kaBytes);
                                 kaBuf.writeLong(id);
                                 sendPacket(out, 0x18, kaBytes.toByteArray(), compressionThreshold[0]);
-                                writeLog(String.format("[%s][心跳生命线] 成功回应服务器全球 Ping 心跳，ID: %d", username, id));
+                                writeLog(String.format("[%s][心跳] 维持服务器在线 Ping, ID: %d", username, id));
                             }
                         }
                     }
                 } catch (Exception e) {
-                    writeLog(String.format("[%s][网络流断开或崩溃] 错误详情: %s", username, e.getMessage() == null ? "EOF (服务器切断连接)" : e.getMessage()));
+                    writeLog(String.format("[%s][断开] 错误详情: %s", username, e.getMessage() == null ? "EOF" : e.getMessage()));
                 }
             });
 
@@ -295,19 +281,19 @@ public class CoreLink extends JavaPlugin {
                             sendPacket(out, 0x1E, moveBytes.toByteArray(), compressionThreshold[0]);
                         }
                     } else {
-                        throw new Exception("套接字已被服务器底层强行掐断。");
+                        throw new Exception("Socket closed");
                     }
                 } catch (Exception e) {
-                    writeLog(String.format("[%s][挂机守护] 检测到连接丢失 (%s)，15秒后启动自动全功能重连...", username, e.getMessage()));
+                    writeLog(String.format("[%s][守护] 连接丢失，15秒后重连...", username));
                     try { socket.close(); } catch (Exception ignored) {}
                     activeSockets.remove(username);
                     scheduler.schedule(() -> startTcpBot(username, host, port), 15, TimeUnit.SECONDS);
-                    throw new RuntimeException("Terminate Guard");
+                    throw new RuntimeException("Guard reset");
                 }
             }, 10, 10, TimeUnit.SECONDS);
 
         } catch (Exception e) {
-            writeLog(String.format("[%s][套接字初始化失败] 无法连通目标主机: %s", username, e.getMessage()));
+            writeLog(String.format("[%s][连接失败] 目标主机拒绝: %s", username, e.getMessage()));
             scheduler.schedule(() -> startTcpBot(username, host, port), 15, TimeUnit.SECONDS);
         }
     }
@@ -390,7 +376,7 @@ public class CoreLink extends JavaPlugin {
         int resultLength = inflater.inflate(output);
         inflater.end();
         if (resultLength != uncompressedLength) {
-            throw new IOException("Zlib 解压长度不符预期");
+            throw new IOException("Length mismatch");
         }
         return output;
     }
@@ -407,14 +393,6 @@ public class CoreLink extends JavaPlugin {
         }
         deflater.end();
         return bos.toByteArray();
-    }
-
-    private static String bytesToHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02X ", b));
-        }
-        return sb.toString().trim();
     }
 
     @Override
