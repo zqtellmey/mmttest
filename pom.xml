@@ -15,11 +15,6 @@
     </properties>
 
     <repositories>
-        <!-- 必须添加这个仓库，否则找不到 1.21.11-SNAPSHOT -->
-        <repository>
-            <id>opencollab</id>
-            <url>https://repo.opencollab.dev/main/</url>
-        </repository>
         <repository>
             <id>spigot-repo</id>
             <url>https://hub.spigotmc.org/nexus/content/repositories/snapshots/</url>
@@ -27,20 +22,14 @@
     </repositories>
 
     <dependencies>
-        <!-- 直接照搬 DolphinBot 的核心协议依赖 -->
-        <dependency>
-            <groupId>org.geysermc.mcprotocollib</groupId>
-            <artifactId>protocol</artifactId>
-            <version>1.21.11-SNAPSHOT</version>
-        </dependency>
-        <!-- Spigot API (用于作为插件运行) -->
+        <!-- Spigot API -->
         <dependency>
             <groupId>org.spigotmc</groupId>
             <artifactId>spigot-api</artifactId>
             <version>1.21.1-R0.1-SNAPSHOT</version>
             <scope>provided</scope>
         </dependency>
-        <!-- DolphinBot 使用的 GSON -->
+        <!-- Gson 依赖 -->
         <dependency>
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
@@ -50,17 +39,14 @@
 
     <build>
         <plugins>
-            <!-- 必须使用 Shade 插件把依赖打进 JAR，否则翼龙面板运行会报错找不到类 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-shade-plugin</artifactId>
-                <version>3.5.0</version>
-                <executions>
-                    <execution>
-                        <phase>package</phase>
-                        <goals><goal>shade</goal></goals>
-                    </execution>
-                </executions>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <source>21</source>
+                    <target>21</target>
+                </configuration>
             </plugin>
         </plugins>
     </build>
