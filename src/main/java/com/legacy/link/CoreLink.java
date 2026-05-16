@@ -52,7 +52,7 @@ public class CoreLink extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        getLogger().info("=== CoreLink: 1.21.11 独立日志调试版启动 (请到插件文件夹查看 RUN.LOG) ===");
+        getLogger().info("=== CoreLink: 1.21.11 状态机严谨同步版启动 ===");
         writeLog("=== 核心服务启动：开始读取账号配置 ===");
 
         File file = new File(getDataFolder(), "acc.json");
@@ -92,6 +92,8 @@ public class CoreLink extends JavaPlugin {
 
             final int[] currentState = { STATE_LOGIN };
             final int[] compressionThreshold = { -1 };
+            // 用一个布尔值标记，是否已经向服务器上报过客户端基础信息
+            final boolean[] clientInfoSubmitted = { false };
 
             // 1. 发送 Handshake (协议号 774)
             ByteArrayOutputStream handshakeBytes = new ByteArrayOutputStream();
@@ -176,35 +178,9 @@ public class CoreLink extends JavaPlugin {
                                 String receivedName = readString(packetIn);
                                 writeLog(String.format("[%s][验证通过] 成功解析 0x02 登录成功信号！UUID: %s, 返回名称: %s", username, new UUID(mostSig, leastSig), receivedName));
                                 
-                                // 核心状态转移
+                                // 核心变更：只切状态，绝对不主动“抢跑”发包，等待服务器在 CONFIG 阶段下发第一包
                                 currentState[0] = STATE_CONFIG;
-                                writeLog(String.format("[%s][状态转移] 切入 CONFIG 阶段。为防服务器解码器产生Tick延迟错位，启动 150ms 锁相同步等待...", username));
-                                
-                                // 强行引入 150ms 的线程缓冲，给服务端 Netty 充分切换到 CONFIG 状态机的时间
-                                final int currentThreshold = compressionThreshold[0];
-                                scheduler.schedule(() -> {
-                                    try {
-                                        if (socket.isConnected() && !socket.isClosed()) {
-                                            writeLog(String.format("[%s][CONFIG安全时序] 150ms 缓冲结束，管道已彻底安全。开始提交 0x00 Client Information...", username));
-                                            
-                                            ByteArrayOutputStream clientInfo = new ByteArrayOutputStream();
-                                            DataOutputStream ciBuf = new DataOutputStream(clientInfo);
-                                            writeString(ciBuf, "zh_CN");      // Locale
-                                            ciBuf.writeByte(10);              // View Distance
-                                            writeVarInt(ciBuf, 0);            // Chat Mode
-                                            ciBuf.writeBoolean(true);         // Chat Colors
-                                            ciBuf.writeByte(127);             // Skin Parts
-                                            writeVarInt(ciBuf, 1);            // Main Hand
-                                            ciBuf.writeBoolean(false);        // Text Filtering
-                                            ciBuf.writeBoolean(true);         // Allow Server Listings
-                                            
-                                            sendPacket(out, 0x00, clientInfo.toByteArray(), currentThreshold);
-                                            writeLog(String.format("[%s][CONFIG安全时序] Client Information 0x00 提交完毕。静等资源配置下发...", username));
-                                        }
-                                    } catch (Exception ex) {
-                                        writeLog(String.format("[%s][错误] 异步构建 Client Information 异常: %s", username, ex.getMessage()));
-                                    }
-                                }, 150, TimeUnit.MILLISECONDS);
+                                writeLog(String.format("[%s][状态转移] 切入 CONFIG 阶段。进入静默期，等待服务端下发首个配置引导包...", username));
                             } 
                             else if (packetId == 0x03) { // Set Compression
                                 compressionThreshold[0] = readVarInt(packetIn);
@@ -223,7 +199,27 @@ public class CoreLink extends JavaPlugin {
                         } 
                         // ==================== STATE_CONFIG 状态分支 ====================
                         else if (currentState[0] == STATE_CONFIG) {
-                            if (packetId == 0x01) { // 1.21.11 Cookie Request 
+                            
+                            // 核心防御：只要收到了服务器在 CONFIG 阶段下发的任何包，且我们还没初始化过 Client Info，就顺水推舟补发
+                            if (!clientInfoSubmitted[0]) {
+                                writeLog(String.format("[%s][CONFIG流控] 捕捉到服务端配置包下发信号，管道已就绪！开始依序补全 0x00 Client Information...", username));
+                                ByteArrayOutputStream clientInfo = new ByteArrayOutputStream();
+                                DataOutputStream ciBuf = new DataOutputStream(clientInfo);
+                                writeString(ciBuf, "zh_CN");      
+                                ciBuf.writeByte(10);              
+                                writeVarInt(ciBuf, 0);            
+                                ciBuf.writeBoolean(true);         
+                                ciBuf.writeByte(127);             
+                                writeVarInt(ciBuf, 1);            
+                                ciBuf.writeBoolean(false);        
+                                ciBuf.writeBoolean(true);         
+                                
+                                sendPacket(out, 0x00, clientInfo.toByteArray(), compressionThreshold[0]);
+                                clientInfoSubmitted[0] = true;
+                                writeLog(String.format("[%s][CONFIG流控] 补发 Client Information 完成。", username));
+                            }
+
+                            if (packetId == 0x01) { // Cookie Request 
                                 String cookieKey = readString(packetIn);
                                 writeLog(String.format("[%s][CONFIG] 收到服务器 Cookie 校验请求 Key: '%s'，正在拼装标准回显响应...", username, cookieKey));
                                 
@@ -235,7 +231,7 @@ public class CoreLink extends JavaPlugin {
                                 sendPacket(out, 0x00, cookieResp.toByteArray(), compressionThreshold[0]);
                                 writeLog(String.format("[%s][CONFIG] 已成功回传 Cookie Response 包 (0x00)", username));
                             }
-                            else if (packetId == 0x0E) { // 1.21.11 Select Known Packs Request
+                            else if (packetId == 0x0E) { // Select Known Packs Request
                                 writeLog(String.format("[%s][CONFIG] 收到服务器资源包清单质询 (0x0E)，正在回传零依赖声明...", username));
                                 
                                 ByteArrayOutputStream kp = new ByteArrayOutputStream();
@@ -245,7 +241,7 @@ public class CoreLink extends JavaPlugin {
                                 sendPacket(out, 0x07, kp.toByteArray(), compressionThreshold[0]);
                                 writeLog(String.format("[%s][CONFIG] 已成功回传 Select Known Packs 响应包 (0x07)", username));
                             }
-                            else if (packetId == 0x02) { // 1.21.11 Finish Configuration
+                            else if (packetId == 0x02) { // Finish Configuration
                                 writeLog(String.format("[%s][CONFIG] 接收到配置终结令牌 (Finish Configuration 0x02)！", username));
                                 
                                 sendPacket(out, 0x03, new byte[0], compressionThreshold[0]);
@@ -262,7 +258,7 @@ public class CoreLink extends JavaPlugin {
                                 sendPacket(out, 0x02, brandResp.toByteArray(), compressionThreshold[0]); 
                             }
                             else {
-                                writeLog(String.format("[%s][CONFIG] 略过非阻塞型配置包 0x%s", username, Integer.toHexString(packetId).toUpperCase()));
+                                writeLog(String.format("[%s][CONFIG] 略过或自动兼容非阻塞型配置包 0x%s", username, Integer.toHexString(packetId).toUpperCase()));
                             }
                         } 
                         // ==================== STATE_PLAY 状态分支 ====================
@@ -381,9 +377,9 @@ public class CoreLink extends JavaPlugin {
             finalBuf.write(rawPacket);
         }
 
-        byte[][] frame = { finalBytes.toByteArray() };
-        writeVarInt(out, frame[0].length);
-        out.write(frame[0]);
+        byte[] frame = finalBytes.toByteArray();
+        writeVarInt(out, frame.length);
+        out.write(frame);
         out.flush();
     }
 
