@@ -22,12 +22,22 @@ public class CoreLink extends JavaPlugin {
     private List<Map<String, String>> accounts = new ArrayList<>();
 
     @Override
-    public void onEnable() {
-        if (!getDataFolder().exists()) getDataFolder().mkdirs();
-        File file = new File(getDataFolder(), "acc.json");
-        if (!file.exists()) saveResource("acc.json", false);
+    public void onLoad() {
+        // 在插件最顶层加载时，强制创建文件夹，确保绝对能生成
+        if (!getDataFolder().exists()) {
+            getDataFolder().mkdirs();
+        }
+    }
 
+    @Override
+    public void onEnable() {
         getLogger().info("=== CoreLink: 1.21.11 原生 TCP 协议模式已启动 ===");
+
+        // 强行释放默认配置文件模版
+        File file = new File(getDataFolder(), "acc.json");
+        if (!file.exists()) {
+            saveResource("acc.json", false);
+        }
 
         try (FileReader reader = new FileReader(file, StandardCharsets.UTF_8)) {
             accounts = new Gson().fromJson(reader, new TypeToken<List<Map<String, String>>>(){}.getType());
@@ -53,7 +63,7 @@ public class CoreLink extends JavaPlugin {
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
             DataInputStream in = new DataInputStream(socket.getInputStream());
 
-            // 1. 发送握手包 (Handshake Packet) - 1.21.11 对应的协议版本号是 768
+            // 1. 发送握手包 (Handshake Packet) - 协议版本号 768 (1.21.11)
             byte[] handshakeData = buildHandshake(host, port, 768, 2);
             sendPacket(out, 0x00, handshakeData);
 
@@ -63,36 +73,30 @@ public class CoreLink extends JavaPlugin {
 
             getLogger().info("机器人 [" + username + "] 登录数据包发送完毕，已进入挂机状态。");
 
-            // 3. 开启心跳与随机移动任务 (每10秒发送一次位置包，防止掉线)
+            // 3. 心跳维持任务
             scheduler.scheduleWithFixedDelay(() -> {
                 try {
                     if (socket.isConnected() && !socket.isClosed()) {
-                        // 发送微小的位置移动包 (ServerboundMovePlayerPosPacket)
-                        // 1.21.x 状态下的 0x1A 或 0x1B 位置包
-                        byte[] moveData = new byte[26]; // 3个double(24字节) + 2个boolean(2字节)
-                        // 这里填充纯 0 或者是微小浮点数数据
+                        byte[] moveData = new byte[26];
                         sendPacket(out, 0x1A, moveData); 
                     }
                 } catch (Exception e) {
-                    getLogger().warning("机器人 [" + username + "] 心跳维持失败，准备重连...");
+                    getLogger().warning("机器人 [" + username + "] 心跳维持失败。");
                 }
             }, 10, 10, TimeUnit.SECONDS);
 
-            // 4. 监听服务器返回，保持连接不被挂起
             byte[] buffer = new byte[1024];
             while (socket.isConnected() && !socket.isClosed()) {
                 int read = in.read(buffer);
-                if (read == -1) break; // 断开连接
+                if (read == -1) break;
             }
 
         } catch (Exception e) {
-            getLogger().warning("机器人 [" + username + "] 连接中断: " + e.getMessage() + "，15秒后自动重连...");
-            // 掉线重连逻辑
+            getLogger().warning("机器人 [" + username + "] 连接中断，15秒后自动重连...");
             scheduler.schedule(() -> startTcpBot(username, host, port), 15, TimeUnit.SECONDS);
         }
     }
 
-    // 构建 Minecraft 握手数据
     private byte[] buildHandshake(String host, int port, int protocolVersion, int nextState) throws Exception {
         java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
         DataOutputStream buf = new DataOutputStream(bytes);
@@ -103,17 +107,14 @@ public class CoreLink extends JavaPlugin {
         return bytes.toByteArray();
     }
 
-    // 构建登录数据
     private byte[] buildLoginStart(String username) throws Exception {
         java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
         DataOutputStream buf = new DataOutputStream(bytes);
         writeString(buf, username);
-        // 1.21.11 包含 UUID 存在标志 (false 表示不带 UUID 传参，由服务器生成)
         buf.writeBoolean(false); 
         return bytes.toByteArray();
     }
 
-    // 发送标准 Minecraft 封包
     private void sendPacket(DataOutputStream out, int packetId, byte[] data) throws Exception {
         java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
         DataOutputStream buf = new DataOutputStream(bytes);
@@ -121,12 +122,11 @@ public class CoreLink extends JavaPlugin {
         buf.write(data);
 
         byte[] packetBytes = bytes.toByteArray();
-        writeVarInt(out, packetBytes.length); // 写入整个包的长度 (VarInt)
+        writeVarInt(out, packetBytes.length);
         out.write(packetBytes);
         out.flush();
     }
 
-    // Helper: 写入 VarInt 变长整型
     private void writeVarInt(DataOutputStream out, int value) throws Exception {
         while ((value & 0xFFFFFF80) != 0L) {
             out.writeByte((value & 0x7F) | 0x80);
@@ -135,7 +135,6 @@ public class CoreLink extends JavaPlugin {
         out.writeByte(value & 0x7F);
     }
 
-    // Helper: 写入 Minecraft 编码字符串
     private void writeString(DataOutputStream out, String str) throws Exception {
         byte[] bytes = str.getBytes(StandardCharsets.UTF_8);
         writeVarInt(out, bytes.length);
