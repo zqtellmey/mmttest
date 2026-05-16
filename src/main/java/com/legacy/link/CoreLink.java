@@ -5,18 +5,18 @@ import com.google.gson.reflect.TypeToken;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.IOException;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.zip.Inflater;
 
 public class CoreLink extends JavaPlugin {
 
@@ -25,7 +25,7 @@ public class CoreLink extends JavaPlugin {
     private List<Map<String, String>> accounts = new ArrayList<>();
     private final Random random = new Random();
 
-    // 状态控制：0=Handshake, 2=Login, 4=Config, 5=Play
+    // 1.21.11 协议状态机常量
     private static final int STATE_LOGIN = 2;
     private static final int STATE_CONFIG = 4;
     private static final int STATE_PLAY = 5;
@@ -39,7 +39,7 @@ public class CoreLink extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        getLogger().info("=== CoreLink: 1.21.11 纯原生 TCP 状态机核心启动 ===");
+        getLogger().info("=== CoreLink: 1.21.11 原生 TCP 精准协议版启动 ===");
 
         File file = new File(getDataFolder(), "acc.json");
         if (!file.exists()) {
@@ -73,165 +73,148 @@ public class CoreLink extends JavaPlugin {
             Socket socket = new Socket(host, port);
             activeSockets.put(username, socket);
 
-            OutputStream out = socket.getOutputStream();
-            InputStream in = socket.getInputStream();
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+            DataInputStream in = new DataInputStream(socket.getInputStream());
 
             final int[] currentState = { STATE_LOGIN };
-            final int[] compressionThreshold = { -1 }; // -1 表示尚未启用压缩
 
-            // 1. 发送握手包 (Handshake Packet) - 1.21.11 协议号为 768
+            // 1. 发送 1.21.11 专属握手包 (协议号 768)
             ByteArrayOutputStream handshakeBytes = new ByteArrayOutputStream();
-            writeVarInt(handshakeBytes, 768);
-            writeString(handshakeBytes, host);
-            handshakeBytes.write((port >> 8) & 0xFF);
-            handshakeBytes.write(port & 0xFF);
-            writeVarInt(handshakeBytes, STATE_LOGIN);
-            sendPacket(out, 0x00, handshakeBytes.toByteArray(), compressionThreshold[0]);
+            DataOutputStream handshakeBuf = new DataOutputStream(handshakeBytes);
+            writeVarInt(handshakeBuf, 768); // 1.21.11 Protocol Version
+            writeString(handshakeBuf, host);
+            handshakeBuf.writeShort(port);
+            writeVarInt(handshakeBuf, STATE_LOGIN); // Next State = 2
+            sendPacket(out, 0x00, handshakeBytes.toByteArray());
 
-            // 2. 发送登录开始包 (Login Start Packet)
+            // 2. 发送 1.21.11 专属 Login Start 包 (结构已彻底改变，包含UUID标记)
             ByteArrayOutputStream loginStartBytes = new ByteArrayOutputStream();
-            writeString(loginStartBytes, username);
-            loginStartBytes.write(0); // Has UUID = false (离线模式不传UUID)
-            sendPacket(out, 0x00, loginStartBytes.toByteArray(), compressionThreshold[0]);
+            DataOutputStream loginStartBuf = new DataOutputStream(loginStartBytes);
+            writeString(loginStartBuf, username);
+            
+            // 关键：1.21.11 离线模式下，必须写入一个固定的伪造 UUID 来补全流，否则服务器解包崩溃
+            UUID mockUuid = UUID.nameUUIDFromBytes(("OfflinePlayer:" + username).getBytes(StandardCharsets.UTF_8));
+            loginStartBuf.writeLong(mockUuid.getMostSignificantBits());
+            loginStartBuf.writeLong(mockUuid.getLeastSignificantBits());
+            sendPacket(out, 0x00, loginStartBytes.toByteArray());
 
-            getLogger().info("机器人 [" + username + "] 基础登录序列已提交，开始解析状态机数据流...");
+            getLogger().info("机器人 [" + username + "] 1.21.11 规范登录流已提交，开始解析状态机数据...");
 
-            // 3. 异步高效轮询处理流
+            // 3. 异步监听接收
             scheduler.execute(() -> {
                 try {
                     while (socket.isConnected() && !socket.isClosed()) {
-                        int packetLength = decodeVarInt(in);
-                        if (packetLength <= 0) break;
+                        int length = readVarInt(in);
+                        if (length <= 0) break;
 
-                        InputStream packetIn = in;
-                        int finalPacketId;
-                        
-                        // 处理压缩逻辑
-                        if (compressionThreshold[0] >= 0) {
-                            int dataLength = decodeVarInt(in);
-                            if (dataLength != 0) { // dataLength != 0 说明包被压缩了
-                                byte[] compressedData = new byte[packetLength - getVarIntLength(dataLength)];
-                                int read = 0;
-                                while (read < compressedData.length) {
-                                    int r = in.read(compressedData, read, compressedData.length - read);
-                                    if (r == -1) break;
-                                    read += r;
-                                }
-                                byte[] uncompressedData = new byte[dataLength];
-                                Inflater inflater = new Inflater();
-                                inflater.setInput(compressedData);
-                                inflater.inflate(uncompressedData);
-                                inflater.end();
-                                
-                                java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(uncompressedData);
-                                finalPacketId = decodeVarInt(bais);
-                                packetIn = bais;
-                            } else {
-                                // dataLength == 0 说明虽然启用了压缩，但此包由于体积小未被真正压缩
-                                finalPacketId = decodeVarInt(in);
-                            }
-                        } else {
-                            // 未启用压缩状态
-                            finalPacketId = decodeVarInt(in);
-                        }
+                        int packetId = readVarInt(in);
 
-                        // === 状态机解析核心逻辑 ===
                         if (currentState[0] == STATE_LOGIN) {
-                            // 0x03: Set Compression (设置压缩)
-                            if (finalPacketId == 0x03) {
-                                compressionThreshold[0] = decodeVarInt(packetIn);
-                                getLogger().info("机器人 [" + username + "] 成功同步服务端的压缩阈值: " + compressionThreshold[0]);
-                            }
-                            // 0x02: Login Success (登录成功)
-                            else if (finalPacketId == 0x02) {
-                                getLogger().info("机器人 [" + username + "] 收到 0x02 登录成功信号！切换至配置状态...");
+                            // 0x02: Login Success (升级至 1.21.11 结构读取)
+                            if (packetId == 0x02) {
+                                // 1.21.11 的 Login Success 内部前16字节是二进制 UUID，后面是用户名 String
+                                long mostSig = in.readLong();
+                                long leastSig = in.readLong();
+                                String receivedName = readString(in);
+                                
+                                getLogger().info("机器人 [" + username + "] 成功解析 0x02 登录成功包！进入配置阶段...");
                                 currentState[0] = STATE_CONFIG;
-                            }
-                            // 0x04: Login Plugin Request (有些防挂机插件会发这个，原路给个空响应通过)
-                            else if (finalPacketId == 0x04) {
-                                int messageId = decodeVarInt(packetIn);
-                                ByteArrayOutputStream resp = new ByteArrayOutputStream();
-                                writeVarInt(resp, messageId);
-                                resp.write(0); // boolean: false
-                                sendPacket(out, 0x02, resp.toByteArray(), compressionThreshold[0]);
+                            } 
+                            // 0x03: Set Compression
+                            else if (packetId == 0x03) {
+                                int threshold = readVarInt(in);
+                                getLogger().info("服务器请求设置压缩阈值: " + threshold + " (离线连接自动忽略挂载)");
                             }
                         } 
                         else if (currentState[0] == STATE_CONFIG) {
-                            // Config 状态下的 0x00: Cookie Request
-                            if (finalPacketId == 0x00) {
-                                sendPacket(out, 0x00, new byte[0], compressionThreshold[0]);
+                            // 1.21.11 配置阶段的 0x00: Cookie Request 
+                            if (packetId == 0x00) {
+                                sendPacket(out, 0x00, new byte[0]); // 响应空 Cookie
                             }
-                            // Config 状态下的 0x01: Clientbound Known Packs
-                            else if (finalPacketId == 0x01) {
+                            // 1.21.11 配置阶段的 0x01: 已知资源包请求
+                            else if (packetId == 0x01) {
                                 ByteArrayOutputStream kp = new ByteArrayOutputStream();
-                                writeVarInt(kp, 0); // 已知资源包为0
-                                sendPacket(out, 0x01, kp.toByteArray(), compressionThreshold[0]);
+                                DataOutputStream kpBuf = new DataOutputStream(kp);
+                                writeVarInt(kpBuf, 0); // 数量为0
+                                sendPacket(out, 0x01, kp.toByteArray());
                             }
-                            // Config 状态下的 0x03: Registry Data (核心注册表数据确认)
-                            else if (finalPacketId == 0x03) {
-                                sendPacket(out, 0x02, new byte[]{0}, compressionThreshold[0]); 
-                            }
-                            // Config 状态下的 0x02: Finish Configuration (服务器宣告配置结束)
-                            else if (finalPacketId == 0x02) {
-                                getLogger().info("机器人 [" + username + "] 配置同步完毕，发送最终配置确认包...");
-                                sendPacket(out, 0x03, new byte[0], compressionThreshold[0]);
+                            // 1.21.11 配置阶段的 0x02: Finish Configuration (配置结束)
+                            else if (packetId == 0x02) {
+                                getLogger().info("机器人 [" + username + "] 收到完成配置指令，正在下发 Acknowledge 确认...");
+                                // 发送配置阶段结束确认应答包 (0x03)
+                                sendPacket(out, 0x03, new byte[0]);
                                 currentState[0] = STATE_PLAY;
-                                getLogger().info("=== 机器人 [" + username + "] 已完美进入 PLAY 状态！服务器端应已显示登录 ===");
+                                getLogger().info("=== 机器人 [" + username + "] 已完美跨入 PLAY 状态！服务器端应已显示登录 ===");
                             }
                         } 
                         else if (currentState[0] == STATE_PLAY) {
-                            // Play 状态下的 Keep Alive 心跳包 (1.21.11 通常为 0x26 或 0x24)
-                            if (finalPacketId == 0x26 || finalPacketId == 0x24 || finalPacketId == 0x03) {
-                                sendPacket(out, 0x15, new byte[0], compressionThreshold[0]); 
+                            // 1.21.11 正式游戏内的 Keep Alive 心跳维持
+                            if (packetId == 0x26 || packetId == 0x24) {
+                                // 提取心跳 ID 并原路应答
+                                long id = in.readLong();
+                                ByteArrayOutputStream kaBytes = new ByteArrayOutputStream();
+                                DataOutputStream kaBuf = new DataOutputStream(kaBytes);
+                                kaBuf.writeLong(id);
+                                sendPacket(out, 0x15, kaBytes.toByteArray());
                             }
-                        }
-
-                        // 如果是原生流且还有残留字节，直接在流里把它排空
-                        if (packetIn == in) {
-                            // 粗略估算当前包还剩下多少字节没读，并把它跳过，维持粘包对齐
-                            // 实际生产中由于大部分是空包或转换包，单次消费即可，以下为安全缓冲
                         }
                     }
                 } catch (Exception e) {
-                    // 异常自动触发断线重连
+                    // 异常自动丢给下面的定时守护任务进行安全重连
                 }
             });
 
-            // 4. 生存维持定时器（进入 PLAY 状态后每 10 秒定时发送位置包防止掉线）
+            // 4. 生存与定时坐标维持守护线程
             scheduler.scheduleWithFixedDelay(() -> {
                 try {
                     if (socket.isConnected() && !socket.isClosed()) {
                         if (currentState[0] == STATE_PLAY) {
+                            // 1.21.11 标准静止挂机位移包 (0x1C)
                             ByteArrayOutputStream moveBytes = new ByteArrayOutputStream();
-                            writeDouble(moveBytes, (random.nextDouble() - 0.5) * 0.02);
-                            writeDouble(moveBytes, 64.0);
-                            writeDouble(moveBytes, (random.nextDouble() - 0.5) * 0.02);
-                            writeFloat(moveBytes, 0.0f);
-                            writeFloat(moveBytes, 0.0f);
-                            moveBytes.write(1); // onGround = true
-                            moveBytes.write(0); // horizontalCollision = false
-                            sendPacket(out, 0x1C, moveBytes.toByteArray(), compressionThreshold[0]); 
+                            DataOutputStream moveBuf = new DataOutputStream(moveBytes);
+                            moveBuf.writeDouble((random.nextDouble() - 0.5) * 0.01);
+                            moveBuf.writeDouble(64.0);
+                            moveBuf.writeDouble((random.nextDouble() - 0.5) * 0.01);
+                            moveBuf.writeFloat(0.0f);
+                            moveBuf.writeFloat(0.0f);
+                            moveBuf.writeBoolean(true);  // onGround
+                            moveBuf.writeBoolean(false); // horizontalCollision
+                            sendPacket(out, 0x1C, moveBytes.toByteArray());
                         }
                     } else {
-                        throw new Exception("Socket Inactive");
+                        throw new Exception("Socket closed");
                     }
                 } catch (Exception e) {
-                    getLogger().warning("机器人 [" + username + "] 纯 TCP 连接中断，15秒后自动重连...");
+                    getLogger().warning("机器人 [" + username + "] 连接断开，15秒后自动重连...");
                     try { socket.close(); } catch (Exception ignored) {}
                     activeSockets.remove(username);
                     scheduler.schedule(() -> startTcpBot(username, host, port), 15, TimeUnit.SECONDS);
-                    throw new RuntimeException("Stop Task");
+                    throw new RuntimeException("Exit Task");
                 }
             }, 10, 10, TimeUnit.SECONDS);
 
         } catch (Exception e) {
-            getLogger().warning("机器人 [" + username + "] TCP 握手失败: " + e.getMessage() + "，15秒后重试...");
+            getLogger().warning("机器人 [" + username + "] 纯 TCP 握手失败: " + e.getMessage() + "，15秒后重试...");
             scheduler.schedule(() -> startTcpBot(username, host, port), 15, TimeUnit.SECONDS);
         }
     }
 
-    // === 严格对齐你给出的规范：VarInt 读写实现 ===
-    private void writeVarInt(OutputStream out, int value) throws Exception {
+    // === 完全复刻自 McBotApp 项目官方规范的 VarInt 读写方法 ===
+    private static int readVarInt(DataInputStream in) throws IOException {
+        int value = 0;
+        int position = 0;
+        byte currentByte;
+        do {
+            currentByte = in.readByte();
+            value |= (currentByte & 0x7F) << (position++ * 7);
+            if (position > 5) {
+                throw new IOException("VarInt too big");
+            }
+        } while ((currentByte & 0x80) != 0);
+        return value;
+    }
+
+    private static void writeVarInt(DataOutputStream out, int value) throws IOException {
         while ((value & ~0x7F) != 0) {
             out.write((value & 0x7F) | 0x80);
             value >>>= 7;
@@ -239,84 +222,29 @@ public class CoreLink extends JavaPlugin {
         out.write(value);
     }
 
-    private int decodeVarInt(InputStream inputStream) throws Exception {
-        int value = 0;
-        int position = 0;
-        int currentByte;
-        while (true) {
-            currentByte = inputStream.read();
-            if (currentByte == -1) {
-                throw new java.io.EOFException("Unexpected end of VarInt");
-            }
-            value |= (currentByte & 0x7F) << (position * 7);
-            if ((currentByte & 0x80) == 0) {
-                break;
-            }
-            position++;
-            if (position > 4) {
-                throw new java.io.IOException("VarInt is too long");
-            }
-        }
-        return value;
+    private static String readString(DataInputStream in) throws IOException {
+        int length = readVarInt(in);
+        byte[] bytes = new byte[length];
+        in.readFully(bytes);
+        return new String(bytes, StandardCharsets.UTF_8);
     }
 
-    private int getVarIntLength(int value) {
-        int length = 0;
-        while ((value & ~0x7F) != 0) {
-            length++;
-            value >>>= 7;
-        }
-        return length + 1;
-    }
-
-    private void sendPacket(OutputStream out, int packetId, byte[] data, int compressionThreshold) throws Exception {
-        ByteArrayOutputStream packetBytes = new ByteArrayOutputStream();
-        writeVarInt(packetBytes, packetId);
-        packetBytes.write(data);
-        byte[] rawPacket = packetBytes.toByteArray();
-
-        if (compressionThreshold >= 0) {
-            // 启用了压缩状态下的发包封装
-            ByteArrayOutputStream compBytes = new ByteArrayOutputStream();
-            writeVarInt(compBytes, 0); // 告诉服务器：这个包很小，我们发的是未压缩的原始数据
-            writeVarInt(compBytes, packetId);
-            compBytes.write(data);
-            
-            byte[] finalBytes = compBytes.toByteArray();
-            writeVarInt(out, finalBytes.length);
-            out.write(finalBytes);
-        } else {
-            // 未压缩状态下的发包封装
-            writeVarInt(out, rawPacket.length);
-            out.write(rawPacket);
-        }
-        out.flush();
-    }
-
-    private void writeString(OutputStream out, String str) throws Exception {
+    private static void writeString(DataOutputStream out, String str) throws IOException {
         byte[] bytes = str.getBytes(StandardCharsets.UTF_8);
         writeVarInt(out, bytes.length);
         out.write(bytes);
     }
 
-    private void writeDouble(OutputStream out, double value) throws Exception {
-        long l = Double.doubleToRawLongBits(value);
-        out.write((int)(l >>> 56) & 0xFF);
-        out.write((int)(l >>> 48) & 0xFF);
-        out.write((int)(l >>> 40) & 0xFF);
-        out.write((int)(l >>> 32) & 0xFF);
-        out.write((int)(l >>> 24) & 0xFF);
-        out.write((int)(l >>> 16) & 0xFF);
-        out.write((int)(l >>> 8) & 0xFF);
-        out.write((int)l & 0xFF);
-    }
+    private void sendPacket(DataOutputStream out, int packetId, byte[] data) throws Exception {
+        ByteArrayOutputStream packetBytes = new ByteArrayOutputStream();
+        DataOutputStream packetBuf = new DataOutputStream(packetBytes);
+        writeVarInt(packetBuf, packetId);
+        packetBuf.write(data);
 
-    private void writeFloat(OutputStream out, float value) throws Exception {
-        int i = Float.floatToRawIntBits(value);
-        out.write((i >>> 24) & 0xFF);
-        out.write((i >>> 16) & 0xFF);
-        out.write((i >>> 8) & 0xFF);
-        out.write((int)i & 0xFF);
+        byte[] rawPacket = packetBytes.toByteArray();
+        writeVarInt(out, rawPacket.length);
+        out.write(rawPacket);
+        out.flush();
     }
 
     @Override
