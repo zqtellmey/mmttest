@@ -23,6 +23,11 @@ public class CoreLink extends JavaPlugin {
     private List<Map<String, String>> accounts = new ArrayList<>();
     private final Random random = new Random();
 
+    // 协议状态常量定义
+    private static final int STATE_LOGIN = 2;
+    private static final int STATE_CONFIG = 4;
+    private static final int STATE_PLAY = 5;
+
     @Override
     public void onLoad() {
         if (!getDataFolder().exists()) {
@@ -32,7 +37,7 @@ public class CoreLink extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        getLogger().info("=== CoreLink: 1.21.11 纯原生 TCP 协议兼容版已启动 ===");
+        getLogger().info("=== CoreLink: 1.21.11 原生 TCP 状态机模式已启动 ===");
 
         File file = new File(getDataFolder(), "acc.json");
         
@@ -63,24 +68,27 @@ public class CoreLink extends JavaPlugin {
 
     private void startTcpBot(String username, String host, int port) {
         try {
-            getLogger().info("正在启动 TCP 连接 -> " + host + ":" + port + " (用户: " + username + ")");
+            getLogger().info("正在建立原生 TCP 链路 -> " + host + ":" + port + " (用户: " + username + ")");
             Socket socket = new Socket(host, port);
             activeSockets.put(username, socket);
 
             DataOutputStream out = new DataOutputStream(socket.getOutputStream());
             DataInputStream in = new DataInputStream(socket.getInputStream());
 
-            // 1. 发送标准握手 (Handshake Packet) - 协议号 768 (1.21.11), 状态设为 2 (Login)
-            byte[] handshakeData = buildHandshake(host, port, 768, 2);
+            // 当前连接所处的 Minecraft 内部协议状态，初始化为 LOGIN
+            final int[] currentState = { STATE_LOGIN };
+
+            // 1. 发送标准握手包 (Handshake) -> 1.21.11 协议号 768, 下一个状态行为 2 (Login)
+            byte[] handshakeData = buildHandshake(host, port, 768, STATE_LOGIN);
             sendPacket(out, 0x00, handshakeData);
 
-            // 2. 发送登录开始 (Login Start Packet)
+            // 2. 发送登录开始包 (Login Start)
             byte[] loginStartData = buildLoginStart(username);
             sendPacket(out, 0x00, loginStartData);
 
-            getLogger().info("机器人 [" + username + "] 握手已提交，正在监听原生 TCP 数据流...");
+            getLogger().info("机器人 [" + username + "] 基础登录序列已提交，开始解析状态机数据流...");
 
-            // 3. 严格遵循原生项目的输入流轮询监听器 (防止发生死锁或粘包)
+            // 3. 核心：原生 TCP 数据流单线程轮询器，负责状态升级转换
             scheduler.execute(() -> {
                 try {
                     while (socket.isConnected() && !socket.isClosed()) {
@@ -89,21 +97,71 @@ public class CoreLink extends JavaPlugin {
                         
                         int packetId = readVarInt(in);
 
-                        // 捕获服务端的 Login Success 状态包
-                        if (packetId == 0x02) {
-                            getLogger().info("机器人 [" + username + "] 成功捕获 0x02 登录成功信号，正在转换协议阶段...");
+                        // 根据当前客户端所处的协议状态（State），分别处理对应的包 ID
+                        if (currentState[0] == STATE_LOGIN) {
+                            // Login 状态下的 0x02: Login Success (登录成功)
+                            if (packetId == 0x02) {
+                                getLogger().info("机器人 [" + username + "] 成功通过 Login 验证，等待转换为 Configuration 状态...");
+                            }
+                            // Login 状态下的 0x03: Set Compression (设置压缩，部分离线服会跳过或发送)
+                            else if (packetId == 0x03) {
+                                getLogger().info("机器人 [" + username + "] 收到压缩限制调整信号。");
+                            }
+                            // Login 状态下的 0x04: Login Plugin Request
+                            else if (packetId == 0x04) {
+                                int messageId = readVarInt(in);
+                                // 原生直接对其进行空应答，拒绝或跳过特定的插件握手
+                                byte[] resp = new byte[5]; // 模拟空的 Plugin Response
+                                sendPacket(out, 0x02, resp);
+                            }
                             
-                            // 遵循项目的阶段转换应答：发送一个空的 Acknowledge 包响应服务器配置
-                            sendPacket(out, 0x03, new byte[0]); 
-                        }
-                        
-                        // 捕获服务端的 Keep Alive / Ping 请求
-                        if (packetId == 0x03 || packetId == 0x15 || packetId == 0x26) {
-                            // 原生项目逻辑：收到心跳立即原路返回空包或应答，确保连接不被踢
-                            sendPacket(out, packetId, new byte[0]);
+                            // 关键：在 1.21.11 中，服务器发送完登录成功后，会自动触发状态切换，
+                            // 我们在此平滑地将接收器状态切换至 CONFIG 阶段
+                            if (packetId == 0x02) {
+                                currentState[0] = STATE_CONFIG;
+                            }
+
+                        } else if (currentState[0] == STATE_CONFIG) {
+                            // Config 状态下的 0x00: Cookie Request
+                            if (packetId == 0x00) {
+                                sendPacket(out, 0x00, new byte[0]); // 应答空 Cookie
+                            }
+                            // Config 状态下的 0x01: Clientbound Known Packs (已知资源包同步)
+                            else if (packetId == 0x01) {
+                                // 告诉服务器：我们是一个没有安装任何额外 Mod 的原生客户端
+                                java.io.ByteArrayOutputStream kBytes = new java.io.ByteArrayOutputStream();
+                                DataOutputStream kBuf = new DataOutputStream(kBytes);
+                                writeVarInt(kBuf, 0); // 已知 Pack 数量为 0
+                                sendPacket(out, 0x01, kBytes.toByteArray());
+                            }
+                            // Config 状态下的 0x03: Registry Data (游戏核心注册表，比如方块、生物列表)
+                            else if (packetId == 0x03) {
+                                // 1.21.11 服务器在发完注册表后，客户端必须回显确认接收完毕
+                                // 发送 Serverbound Select Known Packs / Config Acknowledge
+                                sendPacket(out, 0x02, new byte[]{0}); 
+                            }
+                            // Config 状态下的 0x02: Finish Configuration (服务器宣告配置阶段结束！)
+                            else if (packetId == 0x02) {
+                                getLogger().info("机器人 [" + username + "] 收到 Finish Configuration，正在向服务器发送最终确认包...");
+                                
+                                // 客户端回应：Serverbound Finish Configuration Acknowledge (通常为 0x03 或 0x02)
+                                sendPacket(out, 0x03, new byte[0]);
+                                
+                                // 正式跨入 PLAY 状态！此时服务器控制台将真正亮起玩家登录日志！
+                                currentState[0] = STATE_PLAY;
+                                getLogger().info("=== 机器人 [" + username + "] 已成功跨入 PLAY 游戏状态！服务器应当已显示加入日志 ===");
+                            }
+
+                        } else if (currentState[0] == STATE_PLAY) {
+                            // Play 状态下的通用 Keep Alive 心跳请求 (1.21.11 通常为 0x26 或 0x24)
+                            // 收到后必须将包里的 Long 类型 KeepAlive ID 原路返回
+                            if (packetId == 0x26 || packetId == 0x24 || packetId == 0x03) {
+                                // 原路应答心跳
+                                sendPacket(out, 0x15, new byte[0]); 
+                            }
                         }
 
-                        // 完全跳过包体剩余数据，防止干扰下一个循环的 VarInt 读取
+                        // 这一步至关重要：彻底排空当前数据包中未被读取的残余字节，防止污染下一个 VarInt 包头的读取
                         long skipped = 0;
                         while (skipped < (length - 1)) {
                             long skipActual = in.skip((length - 1) - skipped);
@@ -112,32 +170,33 @@ public class CoreLink extends JavaPlugin {
                         }
                     }
                 } catch (Exception e) {
-                    // 流关闭或异常时转到外部的重连逻辑处理
+                    // 异常断开时由外部的守护定时器处理重连
                 }
             });
 
-            // 4. 定时发送位置状态心跳（项目维持在线的核心发包）
+            // 4. 定时维持在线的任务（每10秒发送一次位置与生存状态同步）
             scheduler.scheduleWithFixedDelay(() -> {
                 try {
                     if (socket.isConnected() && !socket.isClosed()) {
-                        // 构造 1.21.11 精密浮点位移数据包 (0x1C)，带随机偏置
-                        byte[] moveData = buildMoveData();
-                        sendPacket(out, 0x1C, moveData); 
+                        // 只有真正进入 PLAY 状态后，发位置同步包（0x1C）才合法有效
+                        if (currentState[0] == STATE_PLAY) {
+                            byte[] moveData = buildMoveData();
+                            sendPacket(out, 0x1C, moveData); 
+                        }
                     } else {
-                        throw new Exception("Socket Disconnected");
+                        throw new Exception("Socket Lost");
                     }
                 } catch (Exception e) {
-                    getLogger().warning("机器人 [" + username + "] 原生 TCP 连接异常中断，15秒后执行自动重连...");
+                    getLogger().warning("机器人 [" + username + "] 连接断开，准备触发自动重连机制。");
                     try { socket.close(); } catch (Exception ignored) {}
                     activeSockets.remove(username);
-                    // 触发安全重连
                     scheduler.schedule(() -> startTcpBot(username, host, port), 15, TimeUnit.SECONDS);
-                    throw new RuntimeException("Terminate Task");
+                    throw new RuntimeException("Kill Task");
                 }
             }, 10, 10, TimeUnit.SECONDS);
 
         } catch (Exception e) {
-            getLogger().warning("机器人 [" + username + "] 建立 TCP 连接失败: " + e.getMessage() + "，15秒后重试...");
+            getLogger().warning("机器人 [" + username + "] TCP 初始化失败: " + e.getMessage() + "，15秒后自动重连...");
             scheduler.schedule(() -> startTcpBot(username, host, port), 15, TimeUnit.SECONDS);
         }
     }
@@ -163,10 +222,9 @@ public class CoreLink extends JavaPlugin {
     private byte[] buildMoveData() throws Exception {
         java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
         DataOutputStream buf = new DataOutputStream(bytes);
-        // 生成微小的非零位移，防止反作弊判定
-        buf.writeDouble((random.nextDouble() - 0.5) * 0.03);
+        buf.writeDouble((random.nextDouble() - 0.5) * 0.02);
         buf.writeDouble(64.0);
-        buf.writeDouble((random.nextDouble() - 0.5) * 0.03);
+        buf.writeDouble((random.nextDouble() - 0.5) * 0.02);
         buf.writeFloat(0.0f);
         buf.writeFloat(0.0f);
         buf.writeBoolean(true);
