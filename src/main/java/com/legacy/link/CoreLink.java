@@ -8,7 +8,6 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
 import java.io.FileReader;
-import java.io.FileWriter;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -34,21 +33,12 @@ public class CoreLink extends JavaPlugin {
     public void onEnable() {
         getLogger().info("=== CoreLink: 1.21.11 原生 TCP 协议模式已启动 ===");
 
+        // 强行释放默认配置文件模版
         File file = new File(getDataFolder(), "acc.json");
-        
-        // 修正：如果文件不存在，直接用 Java 写入默认配置，不再使用 saveResource
         if (!file.exists()) {
-            try (FileWriter writer = new FileWriter(file, StandardCharsets.UTF_8)) {
-                String defaultJson = "[\n  {\n    \"u\": \"Bot_Worker1\",\n    \"h\": \"127.0.0.1\",\n    \"p\": \"25565\"\n  }\n]";
-                writer.write(defaultJson);
-                writer.flush();
-                getLogger().info("未检测到配置文件，已成功创建默认的 acc.json 模板。");
-            } catch (Exception e) {
-                getLogger().severe("初始化默认 acc.json 失败: " + e.getMessage());
-            }
+            saveResource("acc.json", false);
         }
 
-        // 读取配置文件
         try (FileReader reader = new FileReader(file, StandardCharsets.UTF_8)) {
             accounts = new Gson().fromJson(reader, new TypeToken<List<Map<String, String>>>(){}.getType());
             if (accounts != null) {
