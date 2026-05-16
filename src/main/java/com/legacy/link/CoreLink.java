@@ -27,11 +27,9 @@ public class CoreLink extends JavaPlugin {
     private List<Map<String, String>> accounts = new ArrayList<>();
     private final Random random = new Random();
     
-    // 日志文件专用写入器
     private PrintWriter logWriter;
     private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS");
 
-    // 协议状态常量
     private static final int STATE_LOGIN = 2;
     private static final int STATE_CONFIG = 4;
     private static final int STATE_PLAY = 5;
@@ -41,10 +39,8 @@ public class CoreLink extends JavaPlugin {
         if (!getDataFolder().exists()) {
             getDataFolder().mkdirs();
         }
-        // 初始化 RUN.LOG 文件
         File logFile = new File(getDataFolder(), "RUN.LOG");
         try {
-            // 使用 append = true 模式，防止重启服务器时覆盖掉之前的关键线索
             logWriter = new PrintWriter(new FileWriter(logFile, StandardCharsets.UTF_8, true), true);
             writeLog("================== 插件初始化加载，RUN.LOG 侦听启动 ==================");
         } catch (IOException e) {
@@ -94,15 +90,15 @@ public class CoreLink extends JavaPlugin {
 
             final int[] currentState = { STATE_LOGIN };
 
-            // 1. 发送 1.21.11 专属握手包 (协议号 768)
+            // 1. 发送 1.21.11 精准手握手包 (协议号精准锁定为 774)
             ByteArrayOutputStream handshakeBytes = new ByteArrayOutputStream();
             DataOutputStream handshakeBuf = new DataOutputStream(handshakeBytes);
-            writeVarInt(handshakeBuf, 768); 
+            writeVarInt(handshakeBuf, 774); // 精准对齐 1.21.11 的协议号 774
             writeString(handshakeBuf, host);
             handshakeBuf.writeShort(port);
             writeVarInt(handshakeBuf, STATE_LOGIN); 
             
-            writeLog(String.format("[%s] 正在拼装并发送 Handshake 握手包...", username));
+            writeLog(String.format("[%s] 正在拼装并发送 Handshake 握手包 (使用精准协议号: 774)...", username));
             sendPacket(out, 0x00, handshakeBytes.toByteArray());
 
             // 2. 发送精准 1.21.11 Login Start 包
@@ -110,7 +106,6 @@ public class CoreLink extends JavaPlugin {
             DataOutputStream loginStartBuf = new DataOutputStream(loginStartBytes);
             writeString(loginStartBuf, username);
             
-            // 1.21.11 规范：先写入一个 Boolean(true) 代表紧跟 UUID，随后塞入 16 字节 UUID
             loginStartBuf.writeBoolean(true); 
             UUID mockUuid = UUID.nameUUIDFromBytes(("OfflinePlayer:" + username).getBytes(StandardCharsets.UTF_8));
             loginStartBuf.writeLong(mockUuid.getMostSignificantBits());
@@ -134,11 +129,9 @@ public class CoreLink extends JavaPlugin {
                             break;
                         }
 
-                        // 一次性无损读取该包在套接字里的完整残留，防粘包、防后续流错位
                         byte[] packetBuffer = new byte[length];
                         in.readFully(packetBuffer);
                         
-                        // 核心：直接把抓到的原始网络字节以 Hex 十六进制写入 RUN.LOG 
                         writeLog(String.format("[%s][原始 Hex 监控] 传入字节流: %s", username, bytesToHex(packetBuffer)));
 
                         java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(packetBuffer);
@@ -166,7 +159,7 @@ public class CoreLink extends JavaPlugin {
                             // 0x03: Set Compression
                             else if (packetId == 0x03) {
                                 int threshold = readVarInt(packetIn);
-                                writeLog(String.format("[%s][网络通告] 服务器要求激活网路 Zlib 压缩，阈值指定为: %d 字节", username, threshold));
+                                writeLog(String.format("[%s][网络通告] 服务器要求激活网路 Zlib 压缩，阈值设定为: %d 字节", username, threshold));
                             }
                             // 0x04: Login Plugin Request
                             else if (packetId == 0x04) {
@@ -208,7 +201,6 @@ public class CoreLink extends JavaPlugin {
                             }
                         } 
                         else if (currentState[0] == STATE_PLAY) {
-                            // 游戏内保持活跃心跳
                             if (packetId == 0x26 || packetId == 0x24 || packetId == 0x03) {
                                 long id = packetIn.readLong();
                                 ByteArrayOutputStream kaBytes = new ByteArrayOutputStream();
@@ -258,7 +250,6 @@ public class CoreLink extends JavaPlugin {
         }
     }
 
-    // === 内部通用流日志输出方法 ===
     private synchronized void writeLog(String message) {
         if (logWriter != null) {
             String timeStamp = dateFormat.format(new Date());
@@ -266,7 +257,6 @@ public class CoreLink extends JavaPlugin {
         }
     }
 
-    // === VarInt 读写核心算法 ===
     private static int readVarInt(DataInputStream in) throws IOException {
         int value = 0;
         int position = 0;
