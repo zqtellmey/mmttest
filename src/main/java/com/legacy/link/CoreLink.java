@@ -93,7 +93,7 @@ public class CoreLink extends JavaPlugin {
             final int[] currentState = { STATE_LOGIN };
             final int[] compressionThreshold = { -1 };
 
-            // 1. 发送 1.21.11 握手包
+            // 1. 发送 1.21.11 握手包 (协议号: 774)
             ByteArrayOutputStream handshakeBytes = new ByteArrayOutputStream();
             DataOutputStream handshakeBuf = new DataOutputStream(handshakeBytes);
             writeVarInt(handshakeBuf, 774); 
@@ -163,35 +163,28 @@ public class CoreLink extends JavaPlugin {
                         int packetId = readVarInt(packetIn);
                         writeLog(String.format("[%s][协议解析] 当前状态 [%d] -> 成功分离出 Packet ID: 0x%s", username, currentState[0], Integer.toHexString(packetId).toUpperCase()));
 
+                        // ==================== STATE_LOGIN 状态分支 ====================
                         if (currentState[0] == STATE_LOGIN) {
-                            // 0x00: Disconnect
-                            if (packetId == 0x00) {
+                            if (packetId == 0x00) { // Disconnect
                                 String reason = readString(packetIn);
                                 writeLog(String.format("[%s][拒绝登录] 服务器亮起断开红灯，原因文本: %s", username, reason));
                                 break;
                             }
-                            // 0x02: Login Success
-                            else if (packetId == 0x02) {
+                            else if (packetId == 0x02) { // Login Success
                                 long mostSig = packetIn.readLong();
                                 long leastSig = packetIn.readLong();
                                 String receivedName = readString(packetIn);
                                 writeLog(String.format("[%s][验证通过] 成功解析 0x02 登录成功信号！UUID: %s, 返回名称: %s", username, new UUID(mostSig, leastSig), receivedName));
                                 
-                                // 核心修复点：转换状态，并主动向服务器通告配置确认，打破死等僵局
+                                // 顺利切换状态，保持安静，等待服务器发送 CONFIG 第一条指令
                                 currentState[0] = STATE_CONFIG;
-                                writeLog(String.format("[%s][状态转移] 客户端底层切换为 CONFIGURATION，立即下发客户端配置确认包(0x03)...", username));
-                                
-                                // 1.21.11 在配置阶段由客户端主动发送的客户端设置包（或者空配置应答包）
-                                ByteArrayOutputStream configAcknowledge = new ByteArrayOutputStream();
-                                sendPacket(out, 0x03, configAcknowledge.toByteArray(), compressionThreshold[0]);
+                                writeLog(String.format("[%s][状态转移] 客户端底层正式步入 CONFIGURATION 配置阶段。", username));
                             } 
-                            // 0x03: Set Compression
-                            else if (packetId == 0x03) {
+                            else if (packetId == 0x03) { // Set Compression
                                 compressionThreshold[0] = readVarInt(packetIn);
                                 writeLog(String.format("[%s][网络通告] 服务器要求激活网路 Zlib 压缩，阈值设定为: %d 字节", username, compressionThreshold[0]));
                             }
-                            // 0x04: Login Plugin Request
-                            else if (packetId == 0x04) {
+                            else if (packetId == 0x04) { // Login Plugin Request
                                 int messageId = readVarInt(packetIn);
                                 String channel = readString(packetIn);
                                 writeLog(String.format("[%s][自定义握手] 拦截到第 3 方安全插件通道请求: %s (ID: %d)，自动下发空应答...", username, channel, messageId));
@@ -202,46 +195,70 @@ public class CoreLink extends JavaPlugin {
                                 sendPacket(out, 0x02, resp.toByteArray(), compressionThreshold[0]);
                             }
                         } 
+                        // ==================== STATE_CONFIG 状态分支 ====================
                         else if (currentState[0] == STATE_CONFIG) {
-                            // 0x00: Cookie Request
-                            if (packetId == 0x00) {
-                                writeLog(String.format("[%s][CONFIG] 回复服务器端基础网络 Cookie 校验...", username));
-                                sendPacket(out, 0x00, new byte[0], compressionThreshold[0]);
+                            if (packetId == 0x01) { // 1.21.11 Cookie Request 
+                                String cookieKey = readString(packetIn);
+                                writeLog(String.format("[%s][CONFIG] 收到服务器 Cookie 校验请求 Key: '%s'，正在拼装标准回显响应...", username, cookieKey));
+                                
+                                // 精准构建 1.21.11 Serverbound Cookie Response (0x00)
+                                ByteArrayOutputStream cookieResp = new ByteArrayOutputStream();
+                                DataOutputStream cookieRespBuf = new DataOutputStream(cookieResp);
+                                writeString(cookieRespBuf, cookieKey);
+                                cookieRespBuf.writeBoolean(false); // Has Payload = false
+                                
+                                sendPacket(out, 0x00, cookieResp.toByteArray(), compressionThreshold[0]);
+                                writeLog(String.format("[%s][CONFIG] 已成功回传 Cookie Response 包 (0x00)", username));
                             }
-                            // 0x01: Clientbound Known Packs
-                            else if (packetId == 0x01) {
-                                writeLog(String.format("[%s][CONFIG] 响应服务器注册资源包清单声明...", username));
+                            else if (packetId == 0x0E) { // 1.21.11 Select Known Packs Request
+                                writeLog(String.format("[%s][CONFIG] 收到服务器资源包清单质询 (0x0E)，正在回传零依赖声明...", username));
+                                
+                                // 精准构建 1.21.11 Serverbound Select Known Packs Response (0x07)
                                 ByteArrayOutputStream kp = new ByteArrayOutputStream();
                                 DataOutputStream kpBuf = new DataOutputStream(kp);
-                                writeVarInt(kpBuf, 0); 
-                                sendPacket(out, 0x01, kp.toByteArray(), compressionThreshold[0]);
+                                writeVarInt(kpBuf, 0); // 已知资源包数量: 0
+                                
+                                sendPacket(out, 0x07, kp.toByteArray(), compressionThreshold[0]);
+                                writeLog(String.format("[%s][CONFIG] 已成功回传 Select Known Packs 响应包 (0x07)", username));
                             }
-                            // 0x02: Finish Configuration
-                            else if (packetId == 0x02) {
-                                writeLog(String.format("[%s][CONFIG] 拿到完成配置通告（Finish Configuration）！回传最终确认包...", username));
+                            else if (packetId == 0x02) { // 1.21.11 Finish Configuration
+                                writeLog(String.format("[%s][CONFIG] 接收到配置终结令牌 (Finish Configuration 0x02)！", username));
+                                
+                                // 精准构建 1.21.11 Serverbound Acknowledge Finish (0x03)
                                 sendPacket(out, 0x03, new byte[0], compressionThreshold[0]);
+                                writeLog(String.format("[%s][CONFIG] 已成功回传最终配置确认令牌 (0x03)", username));
+                                
                                 currentState[0] = STATE_PLAY;
-                                writeLog(String.format("[%s] === [大成功] 机器人已完美进入 PLAY 游戏状态！ ===", username));
+                                writeLog(String.format("[%s] === [大成功] 机器人已彻底、无损地进驻 PLAY 游戏视界！ ===", username));
                             }
-                            // 0x03: Registry Data
-                            else if (packetId == 0x03) {
-                                writeLog(String.format("[%s][CONFIG] 接收核心元素注册表数据，发送回显确认...", username));
-                                sendPacket(out, 0x02, new byte[]{0}, compressionThreshold[0]); 
+                            else if (packetId == 0x07) { // Custom Payload (例如 minecraft:brand)
+                                String brandChannel = readString(packetIn);
+                                writeLog(String.format("[%s][CONFIG] 收到服务器核心标签质询: %s，自动回传基础底模响应...", username, brandChannel));
+                                ByteArrayOutputStream brandResp = new ByteArrayOutputStream();
+                                writeString(new DataOutputStream(brandResp), "vanilla");
+                                sendPacket(out, 0x02, brandResp.toByteArray(), compressionThreshold[0]); 
+                            }
+                            else {
+                                // 遇到非关键配置信息（如 Registry Data 0x03 等），保持静默，让流继续往下走
+                                writeLog(String.format("[%s][CONFIG] 略过非阻塞型配置包 0x%s", username, Integer.toHexString(packetId).toUpperCase()));
                             }
                         } 
+                        // ==================== STATE_PLAY 状态分支 ====================
                         else if (currentState[0] == STATE_PLAY) {
-                            if (packetId == 0x26 || packetId == 0x24 || packetId == 0x03) {
+                            // 1.21.11 Play 阶段的心跳 Packet ID (通常为 0x36 或 0x32，这里采用多重兼容阻断)
+                            if (packetId == 0x36 || packetId == 0x32 || packetId == 0x03) {
                                 long id = packetIn.readLong();
                                 ByteArrayOutputStream kaBytes = new ByteArrayOutputStream();
                                 DataOutputStream kaBuf = new DataOutputStream(kaBytes);
                                 kaBuf.writeLong(id);
-                                sendPacket(out, 0x15, kaBytes.toByteArray(), compressionThreshold[0]);
-                                writeLog(String.format("[%s][心跳生命线] 成功回应服务器 Ping 心跳，ID: %d", username, id));
+                                // 1.21.11 Play 阶段的心跳回应包 ID 为 0x18
+                                sendPacket(out, 0x18, kaBytes.toByteArray(), compressionThreshold[0]);
+                                writeLog(String.format("[%s][心跳生命线] 成功回应服务器全球 Ping 心跳，ID: %d", username, id));
                             }
                         }
                     }
                 } catch (Exception e) {
-                    writeLog(String.format("[%s][网络流断开或崩溃] 错误详情: %s", username, e.getMessage() == null ? "EOF (服务器主动关闭连接或超时)" : e.getMessage()));
+                    writeLog(String.format("[%s][网络流断开或崩溃] 错误详情: %s", username, e.getMessage() == null ? "EOF (服务器切断连接)" : e.getMessage()));
                 }
             });
 
@@ -250,6 +267,7 @@ public class CoreLink extends JavaPlugin {
                 try {
                     if (socket.isConnected() && !socket.isClosed()) {
                         if (currentState[0] == STATE_PLAY) {
+                            // 1.21.11 标准挂机位置微调包（防止被 AFK 插件踢出）
                             ByteArrayOutputStream moveBytes = new ByteArrayOutputStream();
                             DataOutputStream moveBuf = new DataOutputStream(moveBytes);
                             moveBuf.writeDouble((random.nextDouble() - 0.5) * 0.01);
@@ -259,7 +277,8 @@ public class CoreLink extends JavaPlugin {
                             moveBuf.writeFloat(0.0f);
                             moveBuf.writeBoolean(true);  
                             moveBuf.writeBoolean(false); 
-                            sendPacket(out, 0x1C, moveBytes.toByteArray(), compressionThreshold[0]);
+                            // 1.21.11 玩家位置与旋转包 ID 为 0x1E
+                            sendPacket(out, 0x1E, moveBytes.toByteArray(), compressionThreshold[0]);
                         }
                     } else {
                         throw new Exception("套接字已被服务器底层强行掐断。");
