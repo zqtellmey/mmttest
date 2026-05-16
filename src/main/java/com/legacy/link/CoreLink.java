@@ -92,8 +92,6 @@ public class CoreLink extends JavaPlugin {
 
             final int[] currentState = { STATE_LOGIN };
             final int[] compressionThreshold = { -1 };
-            // 标记在 CONFIG 阶段是否已经发送过 Client Information
-            final boolean[] hasSentClientInfo = { false };
 
             // 1. 发送 Handshake (协议号 774)
             ByteArrayOutputStream handshakeBytes = new ByteArrayOutputStream();
@@ -178,9 +176,25 @@ public class CoreLink extends JavaPlugin {
                                 String receivedName = readString(packetIn);
                                 writeLog(String.format("[%s][验证通过] 成功解析 0x02 登录成功信号！UUID: %s, 返回名称: %s", username, new UUID(mostSig, leastSig), receivedName));
                                 
-                                // 核心修复：保持绝对静默，只切状态，将发包时机交由服务器的 CONFIG 报文驱动
+                                // 核心状态切换
                                 currentState[0] = STATE_CONFIG;
-                                writeLog(String.format("[%s][状态转移] 切换至 CONFIG 阶段，静默等待服务端下发首个配置指令...", username));
+                                writeLog(String.format("[%s][状态转移] 切入 CONFIG 阶段，强行同步当前网络压缩层(Threshold: %d)打破僵局...", username, compressionThreshold[0]));
+                                
+                                // 精准构建 1.21.11 Serverbound Client Information (0x00)
+                                ByteArrayOutputStream clientInfo = new ByteArrayOutputStream();
+                                DataOutputStream ciBuf = new DataOutputStream(clientInfo);
+                                writeString(ciBuf, "zh_CN");      // Locale
+                                ciBuf.writeByte(10);              // View Distance
+                                writeVarInt(ciBuf, 0);            // Chat Mode
+                                ciBuf.writeBoolean(true);         // Chat Colors
+                                ciBuf.writeByte(127);             // Skin Parts
+                                writeVarInt(ciBuf, 1);            // Main Hand
+                                ciBuf.writeBoolean(false);        // Text Filtering
+                                ciBuf.writeBoolean(true);         // Allow Server Listings
+                                
+                                // 必须将当前的 compressionThreshold 强行带入，使包头封装出正确的 Zlib 格式 (带 0 标头)
+                                sendPacket(out, 0x00, clientInfo.toByteArray(), compressionThreshold[0]);
+                                writeLog(String.format("[%s][CONFIG] 压缩流激活令牌 (Client Information 0x00) 主动提交完毕，等待服务器全面下发配置...", username));
                             } 
                             else if (packetId == 0x03) { // Set Compression
                                 compressionThreshold[0] = readVarInt(packetIn);
@@ -199,27 +213,6 @@ public class CoreLink extends JavaPlugin {
                         } 
                         // ==================== STATE_CONFIG 状态分支 ====================
                         else if (currentState[0] == STATE_CONFIG) {
-                            
-                            // 核心安全闸：一旦服务器送来 CONFIG 的任何包，如果客户端还没初始化，优先把 Client Information 顶出去
-                            if (!hasSentClientInfo[0]) {
-                                writeLog(String.format("[%s][CONFIG安全闸] 捕获到服务端 CONFIG 阶段首包 0x%s。管道已安全，优先补发 0x00 Client Information...", username, Integer.toHexString(packetId).toUpperCase()));
-                                
-                                ByteArrayOutputStream clientInfo = new ByteArrayOutputStream();
-                                DataOutputStream ciBuf = new DataOutputStream(clientInfo);
-                                writeString(ciBuf, "zh_CN");      // Locale
-                                ciBuf.writeByte(10);              // View Distance
-                                writeVarInt(ciBuf, 0);            // Chat Mode
-                                ciBuf.writeBoolean(true);         // Chat Colors
-                                ciBuf.writeByte(127);             // Skin Parts
-                                writeVarInt(ciBuf, 1);            // Main Hand
-                                ciBuf.writeBoolean(false);        // Text Filtering
-                                ciBuf.writeBoolean(true);         // Allow Server Listings
-                                
-                                sendPacket(out, 0x00, clientInfo.toByteArray(), compressionThreshold[0]);
-                                hasSentClientInfo[0] = true;
-                                writeLog(String.format("[%s][CONFIG安全闸] 0x00 Client Information 补发成功，开始响应当前业务包。", username));
-                            }
-
                             if (packetId == 0x01) { // 1.21.11 Cookie Request 
                                 String cookieKey = readString(packetIn);
                                 writeLog(String.format("[%s][CONFIG] 收到服务器 Cookie 校验请求 Key: '%s'，正在拼装标准回显响应...", username, cookieKey));
