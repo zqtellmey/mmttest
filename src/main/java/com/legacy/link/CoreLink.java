@@ -90,28 +90,29 @@ public class CoreLink extends JavaPlugin {
 
             final int[] currentState = { STATE_LOGIN };
 
-            // 1. 发送 1.21.11 精准手握手包 (协议号精准锁定为 774)
+            // 1. 发送 1.21.11 握手包 (协议号 774)
             ByteArrayOutputStream handshakeBytes = new ByteArrayOutputStream();
             DataOutputStream handshakeBuf = new DataOutputStream(handshakeBytes);
-            writeVarInt(handshakeBuf, 774); // 精准对齐 1.21.11 的协议号 774
+            writeVarInt(handshakeBuf, 774); 
             writeString(handshakeBuf, host);
             handshakeBuf.writeShort(port);
             writeVarInt(handshakeBuf, STATE_LOGIN); 
             
-            writeLog(String.format("[%s] 正在拼装并发送 Handshake 握手包 (使用精准协议号: 774)...", username));
+            writeLog(String.format("[%s] 正在拼装并发送 Handshake 握手包 (协议号: 774)...", username));
             sendPacket(out, 0x00, handshakeBytes.toByteArray());
 
-            // 2. 发送精准 1.21.11 Login Start 包
+            // 2. 发送精准 1.21.11 Login Start 包 (ServerboundHelloPacket)
             ByteArrayOutputStream loginStartBytes = new ByteArrayOutputStream();
             DataOutputStream loginStartBuf = new DataOutputStream(loginStartBytes);
+            
+            // 修复核心：1.21.11 规范离线登录，包体内只需先塞名字，紧接着 16 字节 UUID 即可。不能写多余的 Boolean 标志！
             writeString(loginStartBuf, username);
             
-            loginStartBuf.writeBoolean(true); 
             UUID mockUuid = UUID.nameUUIDFromBytes(("OfflinePlayer:" + username).getBytes(StandardCharsets.UTF_8));
             loginStartBuf.writeLong(mockUuid.getMostSignificantBits());
             loginStartBuf.writeLong(mockUuid.getLeastSignificantBits());
             
-            writeLog(String.format("[%s] 正在发送 Login Start 包 (UUID: %s)", username, mockUuid));
+            writeLog(String.format("[%s] 正在发送修复后的 Login Start 包 (UUID: %s)", username, mockUuid));
             sendPacket(out, 0x00, loginStartBytes.toByteArray());
 
             writeLog(String.format("[%s] 基础登录序列已成功提交到 TCP 管道。网络监听就绪，开始阻塞等待服务器响应...", username));
